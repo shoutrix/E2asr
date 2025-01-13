@@ -4,7 +4,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
 librispeech_root = "/speech/arjun/data/LibriSpeech"
-data_save_dir = "/path/to/save/processed/data"
+data_save_dir = ""
 
 splits = {
     "train": ["train-clean-100", "train-clean-360", "train-other-500"],
