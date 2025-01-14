@@ -6,79 +6,62 @@ import torchaudio.transforms as T
 from torch.utils.data import Dataset, DataLoader
 import sentencepiece as spm
 import random
+from pathlib import Path
 from tqdm import tqdm
+import pyarrow.parquet as pq
+from torch.utils.data import dataset, Sampler
+import sys
 
 # Hyperparameters
 NJ = 16
 TARGET_SAMPLE_RATE = 16000
 
+
 class ASRdataset(Dataset):
-    def __init__(self, wav_paths, texts, stoi, sp):
-        self.keys = list(wav_paths.keys())
+    def __init__(self, data, stoi, sp):
+        self.data = data
         self.stoi = stoi
         self.sp = sp
-        
-        common_ids = list(set(wav_paths.keys()) & set(texts.keys()))
-        
-        self.data = {}
-        
-        for i, id_ in tqdm(enumerate(common_ids), total = len(common_ids), desc="Preparing dataset"):
-            arr, sr = torchaudio.load(wav_paths[id_])
-            if sr != TARGET_SAMPLE_RATE:
-                resampler = T.Resample(orig_freq=sr, new_freq=TARGET_SAMPLE_RATE)
-                arr = resampler(arr)
-            if arr.shape[0]>1:
-                c = random.randint(0, arr.shape[0]-1)
-                arr = arr[c].unsqueeze(0)
-            tokens = [self.stoi.get(t, self.stoi["<unk>"]) for t in self.sp.EncodeAsPieces(texts[id_]) + ["<eos>"]]
-            self.data[i] = {"id":id_ ,"speech":arr, "length":arr.shape[0], "tokens":torch.LongTensor(tokens)}
-                
             
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]
-
-
-def load_data(data_path):
-    assert os.path.exists(os.path.join(data_path, "wav.scp"))
-    assert os.path.exists(os.path.join(data_path, "text"))
-
-    with open(os.path.join(data_path, "wav.scp"), "r", encoding="utf-8") as f1, \
-         open(os.path.join(data_path, "text"), "r", encoding="utf-8") as f2:
-        wav_lines = f1.read().splitlines()
-        text_lines = f2.read().splitlines()
-
-        wavs = {line.split(maxsplit=1)[0]: line.split(maxsplit=1)[1] for line in wav_lines}
-        texts = {line.split(maxsplit=1)[0]: line.split(maxsplit=1)[1] for line in text_lines}
-
-    common_utts = wavs.keys() & texts.keys()
-    wavs = {k: v for k, v in wavs.items() if k in common_utts}
-    texts = {k: v for k, v in texts.items() if k in common_utts}
-    return wavs, texts
-
-
-def prepare_text_vocab(train_texts, expdir):
-    data_dir = os.path.join(expdir, "data")
-    os.makedirs(data_dir, exist_ok=True)
+        # print(idx)
+        row = self.data.slice(idx, 1)
+        row_data = {col:row.column(col).to_pylist()[0] for col in row.schema.names}
+        audio, sr = torchaudio.load(row_data["path"])
+        if sr != TARGET_SAMPLE_RATE:
+            resampler = T.Resample(orig_freq=sr, new_freq=TARGET_SAMPLE_RATE)
+            arr = resampler(audio)
+        if audio.shape[0]>1:
+            c = random.randint(0, audio.shape[0]-1)
+            audio = audio[c].unsqueeze(0)
+        tokens = [self.stoi.get(t, self.stoi["<unk>"]) for t in self.sp.EncodeAsPieces(row_data["text"]) + ["<eos>"]]
+        return {"id":row_data["id_"] ,"speech":audio, "length":audio.shape[-1], "tokens":torch.LongTensor(tokens)}
     
-    dump_text_path = os.path.join(data_dir, "dump_text")
+
+
+def prepare_text_vocab(train_set, dump_dir):
+    os.makedirs(dump_dir)
+    dump_text_path = dump_dir / "dump_text.txt"
+    
+    all_text = train_set["text"].to_pylist()
     with open(dump_text_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(train_texts.values()))
+        f.write("\n".join(all_text))
     
     spm.SentencePieceTrainer.train(
         input=dump_text_path,
-        model_prefix=os.path.join(data_dir, "spm"),
+        model_prefix=dump_dir / "spm", 
         model_type="char",
         character_coverage=1.0,
         user_defined_symbols=["<sos>", "<eos>"]
     )
     
     sp = spm.SentencePieceProcessor()
-    sp.load(os.path.join(data_dir, "spm.model"))
+    sp.load(str(dump_dir / "spm.model"))
     
-    with open(os.path.join(data_dir, "spm.vocab"), "r", encoding="utf-8") as f:
+    with open(dump_dir / "spm.vocab", "r", encoding="utf-8") as f:
         vocab = f.read().splitlines()
     
     stoi = {line.split()[0]: i for i, line in enumerate(vocab)}
@@ -86,40 +69,52 @@ def prepare_text_vocab(train_texts, expdir):
     return sp, stoi, itos
 
 
-def prepare_datasets(train_data_path, valid_data_path, expdir):
-    if os.path.exists(expdir):
+def prepare_datasets(data_path, train_set_name, valid_set_name, expdir):
+    
+    expdir = Path(expdir)
+    if expdir.exists():
+        print(f"experiment dir already exists : {expdir}. Removing it.")
         shutil.rmtree(expdir)
     os.makedirs(expdir)
+    
+    data_path = Path(data_path)
+    
+    train_set = pq.read_table((data_path / train_set_name).with_suffix(".parquet"))
+    valid_set = pq.read_table((data_path / valid_set_name).with_suffix(".parquet"))
+    
+    for name in ["id_", "duration", "path", "text"]:
+        assert name in train_set.schema.names
+    
+    dump_dir = expdir / "dump"
+    sp, stoi, itos = prepare_text_vocab(train_set, dump_dir)
+    
+    train_set = ASRdataset(train_set, stoi, sp)
+    valid_set = ASRdataset(valid_set, stoi, sp)
 
-    train_wavs, train_texts = load_data(train_data_path)
-    valid_wavs, valid_texts = load_data(valid_data_path)
-    sp, stoi, itos = prepare_text_vocab(train_texts, expdir)
-
-    train_dataset = ASRdataset(train_wavs, train_texts, stoi, sp)
-    valid_dataset = ASRdataset(valid_wavs, valid_texts, stoi, sp)
-
-    return train_dataset, valid_dataset, stoi, itos, sp
+    return train_set, valid_set, stoi, itos, sp
 
 
-class SortedSampler:
-    def __init__(self, data_source, max_frames, seed, stft_center, win_length, hop_length):
+class SortedSampler(Sampler[list[int]]):
+    def __init__(self, data_source, max_frames, batch_size, seed, stft_center, win_length, hop_length):
         self.data_source = data_source
         self.seed = seed
         
-        def get_frame_length(ilen):
+        def get_frame_length(dur):
+            ilen = dur * TARGET_SAMPLE_RATE
             if stft_center:
                 olen = 1 + ilen // hop_length
             else:
                 olen = 1 + (ilen - win_length) // hop_length
             return olen
         
-        indices = {k:get_frame_length(v["length"]) for k, v in self.data_source.data.items()} 
+        print(f"Setting up Sorted batch sampler with max frame length : {max_frames} and max batch size : {batch_size}")
+        indices = {k:get_frame_length(dur) for k, dur in enumerate(self.data_source.data.column("duration").to_pylist())}
         indices = dict(sorted(indices.items(), key=lambda x : x[1]), reverse=True)
         batches = []
         batch = []
         batch_length = 0
         for i, len_ in indices.items():
-            if batch_length + len_ <= max_frames:
+            if batch_length + len_ <= max_frames and len(batch)<batch_size:
                 batch.append(i)
                 batch_length += len_
             else:
@@ -139,11 +134,9 @@ class SortedSampler:
         return len(self.batches)
             
     
-        
-
 
 def collate_fn(batch):
-    ids_ = [b["id"] for b in batch]
+    # ids_ = [b["id"] for b in batch]
     speech = [b["speech"].squeeze(0) for b in batch]
     tokens = [b["tokens"] for b in batch]
     lengths = [b["length"] for b in batch]

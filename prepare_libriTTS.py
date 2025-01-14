@@ -4,8 +4,8 @@ import soundfile as sf
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
-librispeech_root = "/speech/arjun/data/LibriSpeech"
-data_save_dir = "data/LibriSpeech/"
+libriTTS_root = "/speech/Database/LibriTTS/LibriTTS"
+data_save_dir = "data/LibriTTS/"
 
 splits = {
     "train": ["train-clean-100", "train-clean-360", "train-other-500"],
@@ -15,30 +15,24 @@ splits = {
     "test_other": ["test-other"]
 }
 
-splits = {k: [Path(librispeech_root) / v for v in item] for k, item in splits.items()}
+splits = {k: [Path(libriTTS_root) / v for v in item] for k, item in splits.items()}
 data_save_dir = Path(data_save_dir)
 data_save_dir.mkdir(parents=True, exist_ok=True)
 
 def process_split(split_name, split_data_list):
     data = {}
-    print(f"Processing {split_name}...")
+    print(f"Processing {split_name} ...")
 
     for split_data in split_data_list:
-        all_flacs = split_data.rglob("*.flac")
-        all_text = split_data.rglob("*.txt")
+        all_wavs = split_data.rglob("*.wav")
 
-        for flac_file in all_flacs:
-            id_ = flac_file.stem
-            dur = sf.info(flac_file).duration
-            data[id_] = {"path": flac_file, "duration":dur}
-
-        for text_file in all_text:
+        for wav_file in all_wavs:
+            id_ = wav_file.stem
+            dur = sf.info(wav_file).duration
+            text_file = wav_file.with_suffix(".normalized.txt")
             with open(text_file, "r", encoding="utf-8") as f:
-                text_lines = f.read().splitlines()
-                for line in text_lines:
-                    id_, content = line.strip().split(maxsplit=1)
-                    if id_ in data.keys() and content.strip() != "":
-                        data[id_]["text"] = content
+                text = f.read()
+            data[id_] = {"path": wav_file, "duration":dur, "text":text}
 
     data_list = [{"id_": id_, "duration":id_data["duration"], "path": str(id_data["path"]), "text": id_data.get("text", "")} for id_, id_data in data.items()]
     df = pd.DataFrame(data_list)

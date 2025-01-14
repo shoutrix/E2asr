@@ -1,4 +1,4 @@
-numpy==2.2.1
+numpy==1.26.4
 pandas==2.2.3
 sentencepiece==0.2.0
 torch==1.12.1+cu113

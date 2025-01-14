@@ -5,6 +5,7 @@ import torchaudio.transforms as T
 from dataclasses import dataclass
 import torch.nn.functional as F
 import numpy as np
+import sys
 
 @dataclass
 class ASRconfig:
@@ -188,32 +189,32 @@ class E2ASR(nn.Module):
     def forward(self, speech, speech_lengths, y):
         y = y + 1  # Added 1 to make 0 the filler token
         
-        # print(y)
+        print(y)
         
-        # print(y.shape, max_y_len)
         
         feats, frame_lengths, padding_mask = self.feature_extractor(speech, speech_lengths)
-        feats = self.specaug(feats)
-        feats = feats.transpose(1,2) # B,d,T -> B,T,d
-        feats = self.normalization(feats, frame_lengths, padding_mask)           
-        out_ = self.encoder(feats)
-        logits = self.pred_head(out_)
-        
-        y_mask = torch.ones_like(y, dtype=torch.bool, device=speech.device)
-        y_mask = F.pad(y_mask, (0, logits.shape[1] - y.shape[-1]), value=False)
-        y = F.pad(y, (0, logits.shape[1] - y.shape[-1]), value=0)
-        
-        # print(logits.shape, y.shape)
-        
-        # first_ = torch.argmax(logits[0], dim=-1)
-        # assert y[0].shape == first_.shape, f"shape of y[0] : {y[0].shape} | shape of first_ : {first_.shape}"
-        # print(y[0])
-        # print(first_)
-        
-        
-        assert y_mask.shape == y.shape, f"Shapes of y_mask {y_mask.shape} and y {y.shape} do not match."
-        
-        loss = self.loss_fn(logits.view(-1, logits.shape[-1]), y.view(-1))
-        acc = (torch.argmax(logits.view(-1, logits.shape[-1]), dim=-1)==y.view(-1)).sum().item() / len(y.view(-1))
 
-        return logits, loss, acc
+        # feats = self.specaug(feats)
+        # feats = feats.transpose(1,2) # B,d,T -> B,T,d
+        # feats = self.normalization(feats, frame_lengths, padding_mask)           
+        # out_ = self.encoder(feats)
+        # logits = self.pred_head(out_)
+        
+        # y_mask = torch.ones_like(y, dtype=torch.bool, device=speech.device)
+        # y_mask = F.pad(y_mask, (0, logits.shape[1] - y.shape[-1]), value=False)
+        # y = F.pad(y, (0, logits.shape[1] - y.shape[-1]), value=0)
+        
+        # # print(logits.shape, y.shape)
+        
+        # # first_ = torch.argmax(logits[0], dim=-1)
+        # # assert y[0].shape == first_.shape, f"shape of y[0] : {y[0].shape} | shape of first_ : {first_.shape}"
+        # # print(y[0])
+        # # print(first_)
+        
+        
+        # assert y_mask.shape == y.shape, f"Shapes of y_mask {y_mask.shape} and y {y.shape} do not match."
+        
+        # loss = self.loss_fn(logits.view(-1, logits.shape[-1]), y.view(-1))
+        # acc = (torch.argmax(logits.view(-1, logits.shape[-1]), dim=-1)==y.view(-1)).sum().item() / len(y.view(-1))
+
+        # return logits, loss, acc
