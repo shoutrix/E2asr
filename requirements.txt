@@ -1,0 +1,6 @@
+numpy==2.2.1
+pandas==2.2.3
+sentencepiece==0.2.0
+torch==1.12.1+cu113
+torchaudio==0.12.1+cu113
+tqdm==4.67.1
