@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import soundfile as sf
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
@@ -28,7 +29,8 @@ def process_split(split_name, split_data_list):
 
         for flac_file in all_flacs:
             id_ = flac_file.stem
-            data[id_] = {"path": flac_file}
+            dur = sf.info(flac_file).duration
+            data[id_] = {"path": flac_file, "duration":dur}
 
         for text_file in all_text:
             with open(text_file, "r", encoding="utf-8") as f:
@@ -38,7 +40,7 @@ def process_split(split_name, split_data_list):
                     if id_ in data.keys() and content.strip() != "":
                         data[id_]["text"] = content
 
-    data_list = [{"id_": id_, "path": str(id_data["path"]), "text": id_data.get("text", "")} for id_, id_data in data.items()]
+    data_list = [{"id_": id_, "duration":id_data["duration"], "path": str(id_data["path"]), "text": id_data.get("text", "")} for id_, id_data in data.items()]
     df = pd.DataFrame(data_list)
     parquet_file = data_save_dir / f"{split_name}.parquet"
     df.to_parquet(parquet_file, engine="pyarrow")
