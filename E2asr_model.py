@@ -45,7 +45,10 @@ class AudioFeatureExtractor(nn.Module):
         self.log = lambda x: torch.log1p(x)
     
     def forward(self, x, lengths):
+        
         x = self.MelSpec(x) # shape : B, d, T
+        # print("upto here all good !!")
+        
 
         if self.config.center:
             frame_lengths = 1 + lengths // self.config.hop_length
@@ -175,46 +178,48 @@ class TransformerEncoder(nn.Module):
 
 
 class E2ASR(nn.Module):
-    def __init__(self, config, vocab_size, loss_fn):
+    def __init__(self, config, vocab_size):
         super().__init__()
         self.config = config
         self.vocab_size = vocab_size
-        self.loss_fn = loss_fn
         self.feature_extractor = AudioFeatureExtractor(config)
         self.specaug = SpecAugment(config)
         self.normalization = GlobalMVN(config)
         self.encoder = TransformerEncoder(config)
         self.pred_head = nn.Linear(config.model_dim, self.vocab_size)
+        
+        self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, speech, speech_lengths, y):
-        y = y + 1  # Added 1 to make 0 the filler token
-        
-        print(y)
-        
-        
+
         feats, frame_lengths, padding_mask = self.feature_extractor(speech, speech_lengths)
+        feats = self.specaug(feats)
+        feats = feats.transpose(1,2) # B,d,T -> B,T,d
+        feats = self.normalization(feats, frame_lengths, padding_mask)           
+        out_ = self.encoder(feats)
+        logits = self.pred_head(out_)
+        
+        loss, acc = self.compute_cross_entropy_loss_and_acc(logits, y)
+        return logits, loss, acc
+    
 
-        # feats = self.specaug(feats)
-        # feats = feats.transpose(1,2) # B,d,T -> B,T,d
-        # feats = self.normalization(feats, frame_lengths, padding_mask)           
-        # out_ = self.encoder(feats)
-        # logits = self.pred_head(out_)
+    def compute_cross_entropy_loss_and_acc(self, logits, y):
+        y = y + 1 # to make 0 the filler token
+        B, T, d = logits.shape
+        y = F.pad(y, (0, T  - y.shape[1]), value=0)
+        y_mask = y != 0
+        y_mask = y_mask.view(-1)
+            
+        logits_flat = logits.view(-1, logits.shape[-1])[y_mask]
+        y_flat = y.view(-1)[y_mask]
         
-        # y_mask = torch.ones_like(y, dtype=torch.bool, device=speech.device)
-        # y_mask = F.pad(y_mask, (0, logits.shape[1] - y.shape[-1]), value=False)
-        # y = F.pad(y, (0, logits.shape[1] - y.shape[-1]), value=0)
+        loss = F.cross_entropy(logits_flat, y_flat)
         
-        # # print(logits.shape, y.shape)
+        predicted = torch.argmax(logits_flat, dim=-1)
+        correct_predicted = (predicted == y_flat).sum().item()
         
-        # # first_ = torch.argmax(logits[0], dim=-1)
-        # # assert y[0].shape == first_.shape, f"shape of y[0] : {y[0].shape} | shape of first_ : {first_.shape}"
-        # # print(y[0])
-        # # print(first_)
+        acc = correct_predicted / len(y_flat)
+        return loss, acc
         
         
-        # assert y_mask.shape == y.shape, f"Shapes of y_mask {y_mask.shape} and y {y.shape} do not match."
         
-        # loss = self.loss_fn(logits.view(-1, logits.shape[-1]), y.view(-1))
-        # acc = (torch.argmax(logits.view(-1, logits.shape[-1]), dim=-1)==y.view(-1)).sum().item() / len(y.view(-1))
-
-        # return logits, loss, acc

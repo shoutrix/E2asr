@@ -51,82 +51,51 @@ if torch.cuda.is_available():
     device = "cuda"
 print("using device : ", device)
 
-
-
-# torch.set_float32_matmul_precision("high")
-
-def get_loss_fn(n_classes, padding_class):
-    # class_weights = torch.ones(n_classes)
-    # class_weights[padding_class] = 0.05
-    # loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-    loss_fn = nn.CrossEntropyLoss()
-    return loss_fn
-
-loss_fn = get_loss_fn(vocab_size, 0)
-
-
-model = E2ASR(config, vocab_size, loss_fn)
+model = E2ASR(config, vocab_size)
 
 model = model.to(device)
 
 print(model)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-# model = model.to('cuda')  # Move model to GPU
-print(next(model.parameters()).dtype)  # Check dtype after moving to GPU
 
 max_epoch = 30
-# training
 for epoch in range(max_epoch):
     epoch_loss = 0
-    # print(f"EPOCH : {epoch+1}")
-    # print("Training ...")
     for i, batch in enumerate(train_loader):
-    #     print(batch)
-        # print(batch)
+
         batch_start_time = time.time()
         speech = batch["speech"]
         speech_lengths = batch["lengths"]
         y = batch["tokens"]
+        speech = speech.to(device)
         
-        print(speech.dtype, speech_lengths.dtype, y.dtype)
-        
-        print(speech.shape)
-        print(speech_lengths)
-        print(y.shape)
-        sys.exit()
+        speech, speech_lengths, y = speech.to(device), speech_lengths.to(device), y.to(device)
+        logits, loss, acc = model(speech, speech_lengths, y)
 
-    #     print(y)
-    #     speech, speech_lengths, y = speech.to(device), speech_lengths.to(device), y.to(device)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        batch_end_time = time.time()
+        n_frames = speech.shape[0]*speech.shape[1]
+        print(f"batch : {i+1}/{len(train_loader)} | loss: {loss.item():.4f} | acc : {acc*100:.4f}% | throughput : {int(n_frames / (batch_end_time-batch_start_time))} frames/sec")
+        epoch_loss += loss
+    epoch_loss = epoch_loss / (i+1)
+    print(f"epoch : {epoch}/{max_epoch} | loss : {epoch_loss}")
 
-    #     logits, loss, acc = model(speech, speech_lengths, y)
-    #     sys.exit()
-
-    #     optimizer.zero_grad()
-    #     loss.backward()
-    #     optimizer.step()
-    #     batch_end_time = time.time()
-    #     n_frames = speech.shape[0]*speech.shape[1]
-    #     # break
-    #     print(f"batch : {i+1}/{len(train_loader)} | loss: {loss.item():.4f} | acc : {acc*100:.4f}% | throughput : {int(n_frames / (batch_end_time-batch_start_time))} frames/sec")
-    #     epoch_loss += loss
-    # epoch_loss = epoch_loss / (i+1)
-    # print(f"epoch : {epoch}/{max_epoch} | loss : {epoch_loss}")
-    # # break
-
-    # # validation
-    # print("validating ...")
-    # valid_loss = 0
+    # validation
+    print("validating ...")
+    valid_loss = 0
     
-    # with torch.no_grad():
-    #     model.eval()
-    #     for batch in valid_loader:
-    #         speech = batch["speech"]
-    #         y = batch["tokens"]
-    #         speech_lengths = batch["lengths"]
-    #         speech, speech_lengths, y = speech.to(device), speech_lengths.to(device), y.to(device)
-    #         logits, loss, acc = model(speech, speech_lengths, y)
-    #         valid_loss += loss.item()
+    with torch.no_grad():
+        model.eval()
+        for batch in valid_loader:
+            speech = batch["speech"]
+            y = batch["tokens"]
+            speech_lengths = batch["lengths"]
+            speech, speech_lengths, y = speech.to(device), speech_lengths.to(device), y.to(device)
+            logits, loss, acc = model(speech, speech_lengths, y)
+            valid_loss += loss.item()
         
-    #     valid_loss = valid_loss / len(valid_loader)
-    #     print(f"epoch : {epoch}/{max_epoch} | valid loss : {valid_loss}")
+        valid_loss = valid_loss / len(valid_loader)
+        print(f"epoch : {epoch}/{max_epoch} | valid loss : {valid_loss}")
