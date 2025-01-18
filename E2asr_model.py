@@ -146,12 +146,18 @@ class PositionWiseFeedForward(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, training=True):
         super(MultiheadAttention, self).__init__()
         self.config = config
         self.q = nn.Linear(config.model_dim, config.model_dim)
         self.k = nn.Linear(config.model_dim, config.model_dim)
         self.v = nn.Linear(config.model_dim, config.model_dim)
+        self.out_proj = nn.Linear(config.model_dim, config.model_dim)
+        self.training = training
+        if training:
+            self.dropout_p = 0.2
+        else:
+            self.dropout_p = 0.0
 
     def forward(self, x):
         B, T, _ = x.shape
@@ -163,16 +169,20 @@ class MultiheadAttention(nn.Module):
         querry = querry.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
         key = key.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
         value = value.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
+
+        if hasattr(nn.functional, "scaled_dot_product_attention"):
+            out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p)
+
+        else:
+            scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
+            score = torch.matmul(querry, key.transpose(2,3)) * scale
+            score = score.float()
+            norm_score = F.softmax(score, dim=-1).to(querry.dtype)
+            norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
+            out = torch.matmul(norm_score, value)
         
-        # scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
-        # score = torch.matmul(querry, key.transpose(2,3)) * scale
-        # score = score.float()
-        # norm_score = F.softmax(score, dim=-1).to(querry.dtype)
-        # out = torch.matmul(norm_score, value)
-        
-        out = F.scaled_dot_product_attention(querry, key, value, dropout_p=0.2)
         out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1)
-        return out
+        return self.out_proj(out)
         
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, config):
@@ -200,6 +210,8 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.input_layer = Conv2dSubsampling(config)
         self.positional_embedding = nn.Embedding(config.max_len, config.model_dim) # TODO use a better positional embedding
+        import torch.backends.cuda as cuda
+        print("using Flash sdpa : ", cuda.flash_sdp_enabled())
         self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
         self.norm = nn.LayerNorm(config.model_dim)
 
