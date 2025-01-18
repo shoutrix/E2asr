@@ -21,8 +21,11 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark=False
 
 set_seed(42)
-batch_size = 128
-max_frames = 12800
+
+torch.set_num_threads(8)
+
+batch_size = 64
+max_frames = 38400
 
 train_set_name = "train"
 valid_set_name= "dev_clean"
@@ -43,6 +46,7 @@ valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, collate_fn
 
 
 vocab_size = len(stoi) + 1
+# vocab_size = 96
 print("vocab_size : ", vocab_size)
 print(stoi)
 
@@ -51,15 +55,49 @@ if torch.cuda.is_available():
     device = "cuda"
 print("using device : ", device)
 
-model = E2ASR(config, vocab_size)
+model = E2ASR(config, vocab_size, training=True)
 
 model = model.to(device)
 
 print(model)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+def compute_grad_norm(model):
+    norm_type = 2.0
+    total_grad_norm = 0.0
+    high_grad_norm_modules = []
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.norm(norm_type).item()
+            grad_norm = grad_norm ** norm_type
+            total_grad_norm += grad_norm
+            if grad_norm > grad_norm_threshold:
+                high_grad_norm_modules.append(f"{name} {grad_norm:.4f}")
+    total_grad_norm = total_grad_norm ** (1 / norm_type)
+    return total_grad_norm, high_grad_norm_modules
+    
+
+
+class WarmupScheduler:
+    def __init__(self, optimizer, lr, warmup_steps):
+        self.optimizer = optimizer
+        self.lr = lr
+        self.warmup_steps = warmup_steps
+    
+    def step(self):
+        lr_step = lr
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr_step
+        
+        
 
 max_epoch = 30
+grad_norm_threshold = 1.0
+step = 0
+lr = 1e-5
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+lr_scheduler = WarmupScheduler(optimizer, lr = lr, warmup_steps=10000)
+
 for epoch in range(max_epoch):
     epoch_loss = 0
     for i, batch in enumerate(train_loader):
@@ -75,11 +113,23 @@ for epoch in range(max_epoch):
 
         optimizer.zero_grad()
         loss.backward()
+        
+        grad_norm, high_grad_norm_modules = compute_grad_norm(model)
+        print("grad norm : ", grad_norm)
+        # print(f"modules with gradient higher than {grad_norm_threshold} ----->")
+        # print(high_grad_norm_modules) 
+        
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        lr_scheduler.step()
         optimizer.step()
+        step += 1
         batch_end_time = time.time()
         n_frames = speech.shape[0]*speech.shape[1]
         print(f"batch : {i+1}/{len(train_loader)} | loss: {loss.item():.4f} | acc : {acc*100:.4f}% | throughput : {int(n_frames / (batch_end_time-batch_start_time))} frames/sec")
         epoch_loss += loss
+    #     break
+    # break
+        
     epoch_loss = epoch_loss / (i+1)
     print(f"epoch : {epoch}/{max_epoch} | loss : {epoch_loss}")
 
