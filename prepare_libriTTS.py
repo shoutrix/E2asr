@@ -39,6 +39,8 @@ def process_split(split_name, split_data_list):
     parquet_file = data_save_dir / f"{split_name}.parquet"
     df.to_parquet(parquet_file, engine="pyarrow")
     print(f"finished processing {split_name}, saved to {parquet_file}")
+    
+    
 
 if __name__ == "__main__":
     with ProcessPoolExecutor() as executor:
