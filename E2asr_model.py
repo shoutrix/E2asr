@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 import sys
 import math
+import wandb
 
 @dataclass
 class ASRconfig:
@@ -16,6 +17,8 @@ class ASRconfig:
     hop_length: int = 160
     n_mels: int = 80
     center: bool = True
+    preemphasis: bool = False
+    normalize_energy: bool = False
     time_mask_param: int = 30
     freq_mask_param: int = 15
     norm_mean: bool = True
@@ -25,11 +28,33 @@ class ASRconfig:
     dropout: float = 0.1
     num_heads: int = 8
     num_layers: int = 18
-    encoder_normalize_first: bool = True
     max_len: int = 4992
     
     def validate(self):
         assert self.model_dim % self.num_heads == 0, f"model dim should be divisible by num_heads"
+
+
+def generate_padding_mask(lens, max_len=None):
+    if max_len is None:
+        max_len = torch.amax(lens)
+    range_ = torch.arange(max_len).to(lens.device)
+    mask = range_[None, :] < lens[:, None]
+    return mask
+
+
+def generate_attn_mask(lens, k):
+    mask = generate_padding_mask(lens)
+    mask = mask[:, None, :]
+    if mask.dim() == 3:
+        assert mask.shape[1] == 1
+    elif mask.dim() == 2:
+        mask.unsqueeze(1)
+    else:
+        raise ValueError(f"mask should be either 2 or 3 dimensional. If 3 dimensional then size of dimension 1 should be 1")
+    B, _, T = mask.shape
+    mask = mask.expand(-1, k, -1) # (B, 1, T) -> (B, K, T)
+    mask = mask[:, :, :, None].expand(-1, -1, -1, T)
+    return mask
 
 
 class AudioFeatureExtractor(nn.Module):
@@ -46,24 +71,37 @@ class AudioFeatureExtractor(nn.Module):
             center=config.center
         )
         self.log = lambda x: torch.log(x + 1e-20)
+        self.preemphasis = config.preemphasis
+        self.normalize_energy = config.normalize_energy
+    
+    def pre_emphasis(self, signal, alpha=0.97):
+        emp_signal = torch.cat((signal[:, :1], signal[:, 1:] - alpha * signal[:, :-1]), dim=1)
+        return emp_signal
+    
+    def energy_normalization(self, mel_spec):
+        energy = torch.sqrt(torch.sum(mel_spec ** 2, dim=1, keepdim=True))
+        normalized_mel_spec = mel_spec / (energy + 1e-10)
+        return normalized_mel_spec
     
     def forward(self, x, lengths):
         
-        x = self.MelSpec(x) # shape : B, d, T
-
+        if self.preemphasis:
+            x = self.pre_emphasis(x)
+        x = self.MelSpec(x)
+        if self.normalize_energy:
+            x = self.energy_normalization(x)
+        # print(x)
+            
         if self.config.center:
             frame_lengths = 1 + lengths // self.config.hop_length
         else:
             frame_lengths = 1 + (lengths - self.config.win_length) // self.config.hop_length
 
-        max_len = x.size(-1)
-        range_ = torch.arange(max_len, device=x.device)
-        mask = range_[None, :] <= frame_lengths[:, None]
-        mask = mask.unsqueeze(1)
+        mask = generate_padding_mask(frame_lengths)[:, None, :]
         x = torch.where(mask, x, torch.zeros_like(x))
         x = self.log(x)
+        # print(x)
         return x, frame_lengths, mask
-
 
 class GlobalMVN(nn.Module):
     def __init__(self, config):
@@ -89,7 +127,6 @@ class GlobalMVN(nn.Module):
     
         x = x * padding_mask
         return x
-        
 
 class SpecAugment(nn.Module):
     def __init__(self, config):
@@ -101,8 +138,7 @@ class SpecAugment(nn.Module):
     def forward(self, x):
         x = self.time_mask(x)
         x = self.freq_mask(x)
-        return x
-    
+        return x    
 
 class Conv2dSubsampling(nn.Module):
     def __init__(self, config):
@@ -116,20 +152,41 @@ class Conv2dSubsampling(nn.Module):
             nn.Dropout(p=0.1),
             # nn.AvgPool2d(kernel_size=2)
         )
+        
+        self.get_out_len = lambda x : (((x - 1) // 2) - 1) // 2
         in_dim = config.n_mels
-        flattened_shape = (((in_dim - 1) // 2) - 1) // 2
+        flattened_shape = self.get_out_len(in_dim)
         self.linear = nn.Sequential(
             nn.Dropout(p=0.1),
             nn.Linear(flattened_shape * config.model_dim, config.model_dim)
         )
 
-    def forward(self, x):
+    def forward(self, x, frame_lengths):
         x = x.unsqueeze(1)
         x = self.conv(x)
+        # wandb.log({"conv_std" : torch.std(x)})
         B, C, T, d = x.shape
         x_feats = self.linear(x.transpose(1, 2).contiguous().view(B, T, C * d))
-        return x_feats
+        return x_feats, self.get_out_len(frame_lengths)
 
+class SinusoidalPositionalEmbedding(torch.nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.model_dim = config.model_dim
+        self.max_len = config.max_len
+        self.positional_encodings = self._create_positional_encodings(self.max_len, self.model_dim)
+    
+    def _create_positional_encodings(self, max_len, model_dim):
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_ = torch.exp(torch.arange(0, model_dim, 2).float() * -(math.log(10000.0) / model_dim))
+        sinusoidal_pos_encodings = torch.zeros(max_len, model_dim)
+        sinusoidal_pos_encodings[:, 0::2] = torch.sin(position * div_)
+        sinusoidal_pos_encodings[:, 1::2] = torch.cos(position * div_)
+        return sinusoidal_pos_encodings
+    
+    def forward(self, seq_len, device):
+        assert seq_len <= self.max_len, f"sequence length exceeded max supported length of {self.max_len}"        
+        return self.positional_encodings[:seq_len].to(device)
 
 
 class PositionWiseFeedForward(nn.Module):
@@ -158,8 +215,9 @@ class MultiheadAttention(nn.Module):
             self.dropout_p = 0.2
         else:
             self.dropout_p = 0.0
+        self.qk_scale = (self.config.model_dim // self.config.num_heads) ** -0.25
 
-    def forward(self, x):
+    def forward(self, x, attn_mask):
         B, T, _ = x.shape
         
         querry = self.q(x)
@@ -170,64 +228,67 @@ class MultiheadAttention(nn.Module):
         key = key.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
         value = value.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
 
+        # print(querry.shape, key.shape, value.shape, attn_mask.shape)
+
         if hasattr(nn.functional, "scaled_dot_product_attention"):
-            out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p)
+            out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p, attn_mask=attn_mask)
 
         else:
             scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
-            score = torch.matmul(querry, key.transpose(2,3)) * scale
+            score = torch.matmul(self.qk_scale * querry, self.qk_scale * key.transpose(2,3)) * scale
             score = score.float()
             norm_score = F.softmax(score, dim=-1).to(querry.dtype)
+            norm_score = norm_score * attn_mask
             norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
             out = torch.matmul(norm_score, value)
         
         out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1)
         return self.out_proj(out)
         
+        
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.self_attn = MultiheadAttention(config)
-        self.feed_forward = PositionWiseFeedForward(config)
         self.norm1 = nn.LayerNorm(config.model_dim)
+        self.self_attn = MultiheadAttention(config)
         self.norm2 = nn.LayerNorm(config.model_dim)
-        self.dropout = nn.Dropout(config.dropout)
+        self.feed_forward = PositionWiseFeedForward(config)
+        self.norm_out = nn.LayerNorm(config.model_dim)
         
         # self.register_buffer("residual_scale", (self.config.num_layers*2)**-0.5)
         # self.register_buffer("residual_scale", torch.ones(1))
-        self.residual_scale = nn.Parameter(torch.ones(1))
+        self.residual_scale = 1 / math.sqrt(self.config.num_layers)
 
-    def forward(self, x):  
+    def forward(self, x, attn_mask):  
         
-        x = x + self.residual_scale * self.self_attn(self.norm1(x))
+        x = x + self.residual_scale * self.self_attn(self.norm1(x), attn_mask)
         x = x + self.residual_scale * self.feed_forward(self.norm2(x))
-        return x
+        return self.norm_out(x)
 
 
 class TransformerEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.input_layer = Conv2dSubsampling(config)
-        self.positional_embedding = nn.Embedding(config.max_len, config.model_dim) # TODO use a better positional embedding
-        import torch.backends.cuda as cuda
-        print("using Flash sdpa : ", cuda.flash_sdp_enabled())
+        self.positional_encoding = SinusoidalPositionalEmbedding(config) # TODO use a better positional embedding
         self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
         self.norm = nn.LayerNorm(config.model_dim)
 
-    def forward(self, x):
-        input_feats = self.input_layer(x)
+    def forward(self, x, lengths):
+        input_feats, feat_lengths = self.input_layer(x, lengths)
         B, T, _ = input_feats.shape
-        input_pos = self.positional_embedding(torch.arange(0, T, dtype=torch.long, device=x.device))
-        input_pos = input_pos.unsqueeze(0).expand(B, -1, -1)
+        std_list = []
         
-        x = input_feats + input_pos
+        x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
+        attn_mask = generate_attn_mask(feat_lengths, self.config.num_heads)
         for i, layer in enumerate(self.layers):
-            x = layer(x)
-            x_mean = x.mean()
-            x_std = x.std()
-            print(f"encoder layer {i} | mean : {x_mean} | std : {x_std}")
-        return self.norm(x)
+            x = layer(x, attn_mask)
+            std_list.append(torch.std(x))
+        
+        wandb.log({f"encoder_layer_{i}_std" : v for i, v in enumerate(std_list)})
+        return x
 
 class E2ASR(nn.Module):
     def __init__(self, config, vocab_size, training=True):
@@ -250,9 +311,12 @@ class E2ASR(nn.Module):
         if self.training:
             feats = self.specaug(feats)
         feats = feats.transpose(1, 2)  # B,d,T -> B,T,d
-        feats = self.normalization(feats, frame_lengths, padding_mask)    
-        print(f"features scale | mean : {feats.mean()} | std : {feats.std()}")       
-        out_ = self.encoder(feats)
+        feats = self.normalization(feats, frame_lengths, padding_mask)   
+        # print("frame lengths : ", frame_lengths)
+        # print("padding_mask shape : ", padding_mask.shape)
+        # print(padding_mask) 
+        # print(f"features scale | mean : {feats.mean()} | std : {feats.std()}")       
+        out_ = self.encoder(feats, frame_lengths)
         logits = self.pred_head(out_)
         
         loss, acc = self.compute_masked_cross_entropy_loss_and_acc(logits, y)
@@ -260,17 +324,18 @@ class E2ASR(nn.Module):
     
     def compute_masked_cross_entropy_loss_and_acc(self, logits, y):
         y = y + 1  # to make 0 the filler token
+        # print(y)
         B, T, d = logits.shape
-        y = F.pad(y, (0, T - y.shape[1]), value=0)
+        y = F.pad(y, (0, T - y.shape[1]), value=0).flatten()
         y_mask = y != 0
-        y_mask = y_mask.view(-1)
             
         logits_flat = logits.view(-1, logits.shape[-1])[y_mask]
-        y_flat = y.view(-1)[y_mask]
+        y_flat = y[y_mask]
         
         loss = F.cross_entropy(logits_flat, y_flat)
         
         predicted = torch.argmax(logits_flat, dim=-1)
+        # print(predicted)
         correct_predicted = (predicted == y_flat).sum().item()
         
         acc = correct_predicted / len(y_flat)
@@ -280,14 +345,13 @@ class E2ASR(nn.Module):
         # encoder_PWFF_layer_linear_std = 0.5 * (self.config.num_layers * 2)**-0.5
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-                m.weight.data.mul_(0.1)
+                m.weight.data.mul_(0.45)
             elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                m.weight.data.mul_(0.1)
-                # nn.init.normal_(m.weight, mean=0, std=0.02)
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='linear')
+                m.weight.data.mul_(0.45)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
@@ -298,7 +362,3 @@ class E2ASR(nn.Module):
             
         nn.init.xavier_uniform_(self.pred_head.weight)
         nn.init.constant_(self.pred_head.bias, 0)
-
-        
-        
-        
