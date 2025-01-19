@@ -5,6 +5,8 @@ import random
 import numpy as np
 from collections import defaultdict
 import math
+import torch.backends.cuda as cuda
+import wandb
 
 class CheckpointManager:
     def __init__(self, expdir, metric):
@@ -12,43 +14,42 @@ class CheckpointManager:
         os.makedirs(self.ckpt_dir, exist_ok=True)
         self.param = metric
 
-    def save_checkpoint(self, model, optimizer, lr_scheduler, step, metrics, last_step=True):
+    def save_checkpoint(self, model, optimizer, lr_scheduler, step, last_step=True):
         
         if last_step:
-            save_best = False
-            param_data = metrics[self.param]
-            best_ckpt_path = os.path.join(self.ckpt_dir, f"checkpoint_{self.param}_best.pt")
+            # save_best = False
+            # param_data = metrics[self.param]
+            # best_ckpt_path = os.path.join(self.ckpt_dir, f"checkpoint_{self.param}_best.pt")
 
-            if len(param_data) > 1:
-                if (self.param.endswith("acc") and param_data[-1] > param_data[-2]) or \
-                (self.param.endswith("loss") and param_data[-1] < param_data[-2]):
-                    save_best = True
-            else:
-                save_best = True
+            # if len(param_data) > 1:
+            #     if (self.param.endswith("acc") and param_data[-1] > param_data[-2]) or \
+            #     (self.param.endswith("loss") and param_data[-1] < param_data[-2]):
+            #         save_best = True
+            # else:
+            #     save_best = True
 
-            if save_best:
-                if os.path.exists(best_ckpt_path):
-                    os.remove(best_ckpt_path)
-                self.save_(model, optimizer, lr_scheduler, step, metrics, best_ckpt_path)
+            # if save_best:
+            #     if os.path.exists(best_ckpt_path):
+            #         os.remove(best_ckpt_path)
+            #     self.save_(model, optimizer, lr_scheduler, step, metrics, best_ckpt_path)
 
 
             last_ckpt_path = os.path.join(self.ckpt_dir, "checkpoint_last.pt")
             if os.path.exists(last_ckpt_path):
                 os.remove(last_ckpt_path)
             ckpt_path = last_ckpt_path
-            self.save_(model, optimizer, lr_scheduler, step, metrics, ckpt_path)
+            self.save_(model, optimizer, lr_scheduler, step, ckpt_path)
         
         else:
             ckpt_path = os.path.join(self.ckpt_dir, f"checkpoint_step_{step}.pt")
-            self.save_(model, optimizer, lr_scheduler, step, metrics, ckpt_path)
+            self.save_(model, optimizer, lr_scheduler, step, ckpt_path)
 
-    def save_(self, model, optimizer, lr_scheduler, step, metrics, ckpt_path):
+    def save_(self, model, optimizer, lr_scheduler, step, ckpt_path):
         checkpoint = {
             'step': step,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'lr_scheduler_state_dict': lr_scheduler.state_dict(),
-            'metrics': metrics,
         }
         torch.save(checkpoint, ckpt_path)
         print(f"Checkpoint saved to {ckpt_path}")
@@ -66,10 +67,9 @@ class CheckpointManager:
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         
         step = checkpoint['step']
-        metrics = checkpoint['metrics']
         
         print(f"Checkpoint loaded from {ckpt_path}")
-        return model, optimizer, lr_scheduler, step, metrics
+        return model, optimizer, lr_scheduler, step
 
 
 class CosineScheduler:
@@ -107,7 +107,7 @@ class CosineScheduler:
 
 
 class Trainer:
-    def __init__(self, model, train_loader, valid_loader, device, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, resume=None, logging_freq=100):
+    def __init__(self, model, train_loader, valid_loader, device, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, resume_from_checkpoint=None, logging_freq=100, logger=None):
         self.train_loader = train_loader
         self.valid_loader = valid_loader
         self.device = device
@@ -119,30 +119,40 @@ class Trainer:
         self.save_global_step_freq = save_global_step_freq
         self.seed = seed
         self.logging_freq = logging_freq
+        self.learning_rate = learning_rate
+        self.warmup_steps = warmup_steps
+        self.logger = logger
         
         self.ckpt_manager = CheckpointManager(expdir, "valid_acc")
         self.metrics = defaultdict(list)
 
-        self.total_steps = int((len(train_loader) * max_epoch) / self.accum_grad)
+        self.total_steps = ((len(train_loader) * max_epoch) / self.accum_grad)
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=2.5e-4)
-        self.lr_scheduler = CosineScheduler(base_lr=2.5e-4, warmup_steps=10000, total_steps=self.total_steps)
+        self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
 
-        if resume:
-            ckpt_path = os.path.join(resume)
-            loaded = self.ckpt_manager.load_(ckpt_path, model, self.optimizer, self.lr_scheduler)
+        if resume_from_checkpoint:
+            loaded = self.ckpt_manager.load_(resume_from_checkpoint, model, self.optimizer, self.lr_scheduler)
             if loaded:
-                self.model, self.optimizer, self.lr_scheduler, self.step, self.metrics = loaded
+                model, self.optimizer, self.lr_scheduler, self.step = loaded
             else:
-                self.model = model.to(device)
+                model = model.to(device)
                 self.step = 0
         else:
-            self.model = model.to(device)
+            model = model.to(device)
             self.step = 0
-
-        self.batch = 0
-
-        self.set_seed()
         
+        # try:
+        #     print("torch torch.compile() ...")
+        #     self.model = torch.compile(model)
+        # except:
+        self.model = model
+        print("setting all random seeds ...")
+        self.set_seed()
+        print("using Flash sdpa : ", cuda.flash_sdp_enabled())
+        self.autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        print("autocast dtype set to :", self.autocast_dtype)
+
+
     def set_seed(self):
         random.seed(self.seed)
         np.random.seed(self.seed)
@@ -174,36 +184,44 @@ class Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         avg_train_loss, avg_train_acc = 0, 0
-        for i, batch in enumerate(self.train_loader):
+        for batch_idx, batch in enumerate(self.train_loader):
             speech, speech_lengths, y = batch["speech"].to(self.device), batch["lengths"].to(self.device), batch["tokens"].to(self.device)
-            logits, loss, acc = self.model(speech, speech_lengths, y)
+            with torch.autocast(device_type=self.device, dtype=self.autocast_dtype):
+                _, loss, acc = self.model(speech, speech_lengths, y)
+            # break
             avg_train_loss += loss.item()
             avg_train_acc += acc
             loss.backward()
-            
-            if self.batch % self.accum_grad == 0:
+                        
+            if (batch_idx+1) % self.accum_grad == 0:
+                # print("step")
                 grad_norm = self.compute_grad_norm()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm_threshold)
                 lr = self.lr_scheduler.step()
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = lr
                 self.optimizer.step()
-                self.step += 1
                 self.optimizer.zero_grad()
-                # save global step
-                if self.step % self.save_global_step_freq == 0:
-                    self.ckpt_manager.save_checkpoint(self.model, self.optimizer, self.lr_scheduler, self.step, self.metrics, last_step=False)
-                # svae last step
-                if self.step % self.save_last_step_freq == 0:
-                    self.metrics["train_loss"].append(avg_train_loss / self.save_last_step_freq)
-                    self.metrics["train_acc"].append(avg_train_acc / self.save_last_step_freq)
-                    avg_train_acc = 0
-                    avg_train_loss = 0
-                    self.ckpt_manager.save_checkpoint(self.model, self.optimizer, self.lr_scheduler, self.step, self.metrics, last_step=True)
+                self.step += 1
+                
+                wandb.log({
+                    "step":self.step,
+                    "train_loss":loss.item(),
+                    "train_acc":acc,
+                    "learning_rate":lr,
+                    "grad_norm": grad_norm
+                })
+                
                 # logging
                 if self.step % self.logging_freq == 0:
                     print(f"epoch : {epoch}/{self.max_epoch} |  step : {self.step}/{self.total_steps} |  loss : {loss.item():.4f} | acc : {acc:.4f} | grad norm : {grad_norm:.4f} | lr : {lr}")
-            self.batch += 1
+                # save global step
+                if self.step % self.save_global_step_freq == 0:
+                    self.ckpt_manager.save_checkpoint(self.model, self.optimizer, self.lr_scheduler, self.step, last_step=False)
+                # svae last step
+                if self.step % self.save_last_step_freq == 0:
+                    self.ckpt_manager.save_checkpoint(self.model, self.optimizer, self.lr_scheduler, self.step, last_step=True)
+
                     
                     
     def validate_epoch(self, epoch):
@@ -212,9 +230,8 @@ class Trainer:
         with torch.no_grad():
             for batch in self.valid_loader:
                 speech, speech_lengths, y = batch["speech"].to(self.device), batch["lengths"].to(self.device), batch["tokens"].to(self.device)
-                logits, loss, acc = self.model(speech, speech_lengths, y)
+                _, loss, acc = self.model(speech, speech_lengths, y)
                 avg_valid_loss += loss.item()
                 avg_valid_acc += acc
-        self.metrics["valid_loss"].append(avg_valid_loss / len(self.valid_loader))
-        self.metrics["valid_acc"].append(avg_valid_acc / len(self.valid_loader))
-        print(f"Validation - epoch {epoch} | loss {avg_valid_loss / len(self.valid_loader)} | acc {avg_valid_acc / len(self.valid_loader)}")
+        print(f"Validation :: epoch : {epoch} | loss : {avg_valid_loss / len(self.valid_loader)} | acc : {avg_valid_acc / len(self.valid_loader)}")
+        wandb.log({"valid_loss":avg_valid_loss, "valid_acc":avg_valid_acc})
