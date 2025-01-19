@@ -11,6 +11,7 @@ from tqdm import tqdm
 import pyarrow.parquet as pq
 from torch.utils.data import dataset, Sampler
 import sys
+import itertools
 
 # Hyperparameters
 NJ = 16
@@ -27,16 +28,19 @@ class ASRdataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # print(idx)
         row = self.data.slice(idx, 1)
         row_data = {col:row.column(col).to_pylist()[0] for col in row.schema.names}
         audio, sr = torchaudio.load(row_data["path"])
+
         if sr != TARGET_SAMPLE_RATE:
             resampler = T.Resample(orig_freq=sr, new_freq=TARGET_SAMPLE_RATE)
-            arr = resampler(audio)
+            audio = resampler(audio)
+            # print(audio.shape)
+
         if audio.shape[0]>1:
             c = random.randint(0, audio.shape[0]-1)
             audio = audio[c].unsqueeze(0)
+            
         tokens = [self.stoi.get(t, self.stoi["<unk>"]) for t in self.sp.EncodeAsPieces(row_data["text"]) + ["<eos>"]]
         return {"id":row_data["id_"] ,"speech":audio, "length":audio.shape[-1], "tokens":torch.LongTensor(tokens)}
     
@@ -71,6 +75,7 @@ def prepare_text_vocab(train_set, dump_dir):
 
 def prepare_datasets(data_path, train_set_name, valid_set_name, expdir):
     
+    # TODO don't delete old experiments
     expdir = Path(expdir)
     if expdir.exists():
         print(f"experiment dir already exists : {expdir}. Removing it.")
@@ -108,11 +113,12 @@ class SortedSampler(Sampler[list[int]]):
             return olen
         
         print(f"Setting up Sorted batch sampler with max frame length : {max_frames} and max batch size : {batch_size}")
-        indices = {k:get_frame_length(dur) for k, dur in enumerate(self.data_source.data.column("duration").to_pylist())}
-        indices = dict(sorted(indices.items(), key=lambda x : x[1]), reverse=True)
+        indices = {k:int(get_frame_length(dur)) for k, dur in enumerate(self.data_source.data.column("duration").to_pylist())}
+        indices = dict(sorted(indices.items(), key=lambda item: item[1], reverse=True))
         batches = []
         batch = []
         batch_length = 0
+        # print(indices)
         for i, len_ in indices.items():
             if batch_length + len_ <= max_frames and len(batch)<batch_size:
                 batch.append(i)
@@ -136,7 +142,7 @@ class SortedSampler(Sampler[list[int]]):
     
 
 def collate_fn(batch):
-    # ids_ = [b["id"] for b in batch]
+    ids_ = [b["id"] for b in batch]
     speech = [b["speech"].squeeze(0) for b in batch]
     tokens = [b["tokens"] for b in batch]
     lengths = [b["length"] for b in batch]
@@ -144,8 +150,6 @@ def collate_fn(batch):
     speech = torch.nn.utils.rnn.pad_sequence(speech, batch_first=True, padding_value=0.0)
     text = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=-1)
     lengths = torch.tensor(lengths)
-    
-    # print(ids_)
     
     return {
         "speech": speech,
