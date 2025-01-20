@@ -9,20 +9,21 @@ import wandb
 
 # HYPER PARAMETERS
 data_path = "/speech/shoutrik/torch_exp/E2asr/data/LibriTTS"
-expdir = "/speech/shoutrik/torch_exp/E2asr/exp/test01"
+expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_train_large_768_24_12"
 train_set_name = "train"
 valid_set_name = "dev_clean"
-max_frames = 38400
-batch_size = 64
-max_epoch = 30
+max_frames = 57600
+batch_size = 96
+max_epoch = 200
 grad_norm_threshold = 1.0
-save_last_step_freq = 2000
-save_global_step_freq = 20000
-logging_freq = 100
+save_last_step_freq = 10000
+save_global_step_freq = 40000
+logging_freq = 500
 seed=42
 accum_grad=2
 learning_rate = 2e-4
-warmup_steps = 10000
+warmup_steps = 40000
+weight_decay=0.1
 config = ASRconfig(
     sample_rate= 16000,
     n_fft=512,
@@ -36,18 +37,18 @@ config = ASRconfig(
     freq_mask_param=15,
     norm_mean=True,
     norm_var=True,
-    model_dim=512,
-    feedforward_dim=208,
+    model_dim=768,
+    feedforward_dim=3072,
     dropout=0.1,
-    num_heads=8,
-    num_layers=18,
+    num_heads=12,
+    num_layers=24,
     max_len=1600,
+    stochastic_depth_p=0.1,
 )
-
 
 wandb.init(
     project="E2asr",
-    name="libriTTS_trial01",
+    name=os.path.basename(expdir),
     id=wandb.util.generate_id(),
     resume="allow",
     config={
@@ -60,6 +61,7 @@ wandb.init(
         "num_heads": config.num_heads,
         "model_dim": config.model_dim,
         "feedforward_dim": config.feedforward_dim,
+        "stochastic_depth_p": config.stochastic_depth_p
     }
 )
 
@@ -91,6 +93,7 @@ trainer = Trainer(model=model,
                   seed=seed,
                   learning_rate=learning_rate,
                   warmup_steps=warmup_steps,
+                  weight_decay=weight_decay,
                   logger="wandb"
                   )
 

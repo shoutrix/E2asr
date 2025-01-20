@@ -97,7 +97,7 @@ class AudioFeatureExtractor(nn.Module):
         else:
             frame_lengths = 1 + (lengths - self.config.win_length) // self.config.hop_length
 
-        mask = generate_padding_mask(frame_lengths)[:, None, :]
+        mask = generate_padding_mask(frame_lengths)[:, None, :]        
         x = torch.where(mask, x, torch.zeros_like(x))
         x = self.log(x)
         # print(x)
@@ -125,7 +125,7 @@ class GlobalMVN(nn.Module):
             std = torch.clamp(torch.sqrt(var), min=1e-20)
             x = x / std  
     
-        x = x * padding_mask
+        x = x * padding_mask        
         return x
 
 class SpecAugment(nn.Module):
@@ -202,93 +202,93 @@ class PositionWiseFeedForward(nn.Module):
         return self.mod(x)
 
 
-class MultiheadAttention(nn.Module):
-    def __init__(self, config, training=True):
-        super(MultiheadAttention, self).__init__()
-        self.config = config
-        self.q = nn.Linear(config.model_dim, config.model_dim)
-        self.k = nn.Linear(config.model_dim, config.model_dim)
-        self.v = nn.Linear(config.model_dim, config.model_dim)
-        self.out_proj = nn.Linear(config.model_dim, config.model_dim)
-        self.training = training
-        if training:
-            self.dropout_p = 0.2
-        else:
-            self.dropout_p = 0.0
-        self.qk_scale = (self.config.model_dim // self.config.num_heads) ** -0.25
+# class MultiheadAttention(nn.Module):
+#     def __init__(self, config, training=True):
+#         super(MultiheadAttention, self).__init__()
+#         self.config = config
+#         self.q = nn.Linear(config.model_dim, config.model_dim)
+#         self.k = nn.Linear(config.model_dim, config.model_dim)
+#         self.v = nn.Linear(config.model_dim, config.model_dim)
+#         self.out_proj = nn.Linear(config.model_dim, config.model_dim)
+#         self.training = training
+#         if training:
+#             self.dropout_p = 0.2
+#         else:
+#             self.dropout_p = 0.0
+#         self.qk_scale = (self.config.model_dim // self.config.num_heads) ** -0.25
 
-    def forward(self, x, attn_mask):
-        B, T, _ = x.shape
+#     def forward(self, x, attn_mask):
+#         B, T, _ = x.shape
         
-        querry = self.q(x)
-        key = self.k(x)
-        value = self.v(x)
+#         querry = self.q(x)
+#         key = self.k(x)
+#         value = self.v(x)
 
-        querry = querry.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
-        key = key.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
-        value = value.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
+#         querry = querry.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
+#         key = key.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
+#         value = value.view(B, T, self.config.num_heads, self.config.model_dim // self.config.num_heads).permute(0, 2, 1, 3)
 
-        # print(querry.shape, key.shape, value.shape, attn_mask.shape)
+#         # print(querry.shape, key.shape, value.shape, attn_mask.shape)
 
-        if hasattr(nn.functional, "scaled_dot_product_attention"):
-            out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p, attn_mask=attn_mask)
+#         if hasattr(nn.functional, "scaled_dot_product_attention"):
+#             out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p)
 
-        else:
-            scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
-            score = torch.matmul(self.qk_scale * querry, self.qk_scale * key.transpose(2,3)) * scale
-            score = score.float()
-            norm_score = F.softmax(score, dim=-1).to(querry.dtype)
-            norm_score = norm_score * attn_mask
-            norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
-            out = torch.matmul(norm_score, value)
+#         else:
+#             scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
+#             score = torch.matmul(self.qk_scale * querry, self.qk_scale * key.transpose(2,3)) * scale
+#             score = score.float()
+#             norm_score = F.softmax(score, dim=-1).to(querry.dtype)
+#             # norm_score = norm_score * attn_mask
+#             norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
+#             out = torch.matmul(norm_score, value)
         
-        out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1)
-        return self.out_proj(out)
+#         out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1)
+#         return self.out_proj(out)
         
         
-class TransformerEncoderLayer(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.norm1 = nn.LayerNorm(config.model_dim)
-        self.self_attn = MultiheadAttention(config)
-        self.norm2 = nn.LayerNorm(config.model_dim)
-        self.feed_forward = PositionWiseFeedForward(config)
-        self.norm_out = nn.LayerNorm(config.model_dim)
+# class TransformerEncoderLayer(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.config = config
+#         self.norm1 = nn.LayerNorm(config.model_dim)
+#         self.self_attn = MultiheadAttention(config)
+#         self.norm2 = nn.LayerNorm(config.model_dim)
+#         self.feed_forward = PositionWiseFeedForward(config)
+#         self.norm_out = nn.LayerNorm(config.model_dim)
         
-        # self.register_buffer("residual_scale", (self.config.num_layers*2)**-0.5)
-        # self.register_buffer("residual_scale", torch.ones(1))
-        self.residual_scale = 1 / math.sqrt(self.config.num_layers)
+#         # self.register_buffer("residual_scale", (self.config.num_layers*2)**-0.5)
+#         # self.register_buffer("residual_scale", torch.ones(1))
+#         self.residual_scale = 1 / math.sqrt(self.config.num_layers)
 
-    def forward(self, x, attn_mask):  
+#     def forward(self, x, attn_mask):  
         
-        x = x + self.residual_scale * self.self_attn(self.norm1(x), attn_mask)
-        x = x + self.residual_scale * self.feed_forward(self.norm2(x))
-        return self.norm_out(x)
+#         x = x + self.residual_scale * self.self_attn(self.norm1(x), attn_mask)
+#         x = x + self.residual_scale * self.feed_forward(self.norm2(x))
+#         return self.norm_out(x)
 
 
-class TransformerEncoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.input_layer = Conv2dSubsampling(config)
-        self.positional_encoding = SinusoidalPositionalEmbedding(config) # TODO use a better positional embedding
-        self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.model_dim)
+# class TransformerEncoder(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.config = config
+#         self.input_layer = Conv2dSubsampling(config)
+#         self.positional_encoding = SinusoidalPositionalEmbedding(config) # TODO use a better positional embedding
+#         self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
+#         self.norm = nn.LayerNorm(config.model_dim)
 
-    def forward(self, x, lengths):
-        input_feats, feat_lengths = self.input_layer(x, lengths)
-        B, T, _ = input_feats.shape
-        std_list = []
+#     def forward(self, x, lengths):
+#         input_feats, feat_lengths = self.input_layer(x, lengths)
+#         B, T, _ = input_feats.shape
+#         std_list = []
         
-        x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
-        attn_mask = generate_attn_mask(feat_lengths, self.config.num_heads)
-        for i, layer in enumerate(self.layers):
-            x = layer(x, attn_mask)
-            std_list.append(torch.std(x))
+#         x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
+#         attn_mask = generate_attn_mask(feat_lengths, self.config.num_heads)
+#         for i, layer in enumerate(self.layers):
+#             x = layer(x, attn_mask)
+#             std_list.append(torch.std(x))
         
-        wandb.log({f"encoder_layer_{i}_std" : v for i, v in enumerate(std_list)})
-        return x
+#         wandb.log({f"encoder_layer_{i}_std" : v for i, v in enumerate(std_list)})
+#         return x
 
 class E2ASR(nn.Module):
     def __init__(self, config, vocab_size, training=True):
@@ -300,23 +300,40 @@ class E2ASR(nn.Module):
         self.feature_extractor = AudioFeatureExtractor(config)
         self.specaug = SpecAugment(config)
         self.normalization = GlobalMVN(config)
-        self.encoder = TransformerEncoder(config)
+        # self.encoder = TransformerEncoder(config)
+        self.input_layer = Conv2dSubsampling(config)
+        self.positional_encoding = SinusoidalPositionalEmbedding(config)
+        
+        encoder_layer = nn.TransformerEncoderLayer(d_model=config.model_dim,
+                                                   nhead=config.num_heads,
+                                                   dim_feedforward=config.feedforward_dim,
+                                                   activation="gelu",
+                                                   batch_first=True,
+                                                   norm_first=True,
+                                                   )
+        self.encoder = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=config.num_layers)
+        
         self.pred_head = nn.Linear(config.model_dim, self.vocab_size)
         
         self.loss_fn = nn.CrossEntropyLoss()
         self.initialize_parameters()
+        
 
     def forward(self, speech, speech_lengths, y):
         feats, frame_lengths, padding_mask = self.feature_extractor(speech, speech_lengths)
         if self.training:
             feats = self.specaug(feats)
         feats = feats.transpose(1, 2)  # B,d,T -> B,T,d
-        feats = self.normalization(feats, frame_lengths, padding_mask)   
-        # print("frame lengths : ", frame_lengths)
-        # print("padding_mask shape : ", padding_mask.shape)
-        # print(padding_mask) 
-        # print(f"features scale | mean : {feats.mean()} | std : {feats.std()}")       
-        out_ = self.encoder(feats, frame_lengths)
+        feats = self.normalization(feats, frame_lengths, padding_mask)
+        feats, feat_lengths = self.input_layer(feats, frame_lengths)
+        B, T, _ = feats.shape
+        input_feats = feats + self.positional_encoding(feats.shape[1], feats.device)
+        attn_mask = generate_attn_mask(feat_lengths, self.config.num_heads)
+
+        out_ = self.encoder(input_feats)   
+        # out_ = self.encoder(feats, frame_lengths)
+
+        out_ = self.encoder(feats)
         logits = self.pred_head(out_)
         
         loss, acc = self.compute_masked_cross_entropy_loss_and_acc(logits, y)
