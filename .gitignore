@@ -1,3 +1,9 @@
 0_utterance_mel.txt 1_utterance_mel.txt __pycache__/ exp/ small_test_set/
 exp
 data
+test.py
+wandb/
+pycache/
+__pycache__/
+test.py
+E2asr_model_bkp.py
