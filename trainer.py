@@ -105,6 +105,37 @@ class CosineScheduler:
         self.current_step = state_dict['current_step']
 
 
+class WarmupScheduler:
+    def __init__(self, base_lr, warmup_steps):
+        self.base_lr = base_lr
+        self.warmup_steps = warmup_steps
+        self.current_step = 0
+
+    def get_lr(self):
+        scale = self.base_lr * self.warmup_steps ** 0.5
+        if self.current_step < self.warmup_steps:
+            lr = scale * self.current_step * self.warmup_steps ** -1.5
+        else:
+            lr = scale * min(self.current_step ** -0.5, self.current_step * self.warmup_steps ** -1.5)
+        return lr
+
+    def step(self):
+        self.current_step += 1
+        return self.get_lr()
+
+    def state_dict(self):
+        return {
+            'base_lr': self.base_lr,
+            'warmup_steps': self.warmup_steps,
+            'current_step': self.current_step
+        }
+
+    def load_state_dict(self, state_dict):
+        self.base_lr = state_dict['base_lr']
+        self.warmup_steps = state_dict['warmup_steps']
+        self.current_step = state_dict['current_step']
+
+
 
 class Trainer:
     def __init__(self, model, train_loader, valid_loader, device, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, resume_from_checkpoint=None, logging_freq=100, logger=None):
@@ -128,7 +159,8 @@ class Trainer:
 
         self.total_steps = ((len(train_loader) * max_epoch) / self.accum_grad)
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=2.5e-4)
-        self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
+        # self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
+        self.lr_scheduler = WarmupScheduler(base_lr=learning_rate, warmup_steps=warmup_steps)
 
         if resume_from_checkpoint:
             loaded = self.ckpt_manager.load_(resume_from_checkpoint, model, self.optimizer, self.lr_scheduler)
@@ -137,6 +169,7 @@ class Trainer:
             else:
                 model = model.to(device)
                 self.step = 0
+            self.last_epoch = int(((self.total_steps - self.step) * self.accum_grad) // len(train_loader))
         else:
             model = model.to(device)
             self.step = 0
@@ -176,7 +209,7 @@ class Trainer:
     def train(self):
         self.model.to(self.device)
         print(f"training started | epochs : {self.max_epoch} | batches : {len(self.train_loader)} | accum_grad : {self.accum_grad} | updates : {self.total_steps}")
-        for epoch in range(self.max_epoch):
+        for epoch in range(self.last_epoch, self.max_epoch):
             self.train_epoch(epoch)
             self.validate_epoch(epoch)
             
@@ -186,9 +219,8 @@ class Trainer:
         avg_train_loss, avg_train_acc = 0, 0
         for batch_idx, batch in enumerate(self.train_loader):
             speech, speech_lengths, y = batch["speech"].to(self.device), batch["lengths"].to(self.device), batch["tokens"].to(self.device)
-            with torch.autocast(device_type=self.device, dtype=self.autocast_dtype):
-                _, loss, acc = self.model(speech, speech_lengths, y)
-            # break
+            # with torch.autocast(device_type=self.device, dtype=self.autocast_dtype):
+            _, loss, acc = self.model(speech, speech_lengths, y)
             avg_train_loss += loss.item()
             avg_train_acc += acc
             loss.backward()
@@ -234,4 +266,4 @@ class Trainer:
                 avg_valid_loss += loss.item()
                 avg_valid_acc += acc
         print(f"Validation :: epoch : {epoch} | loss : {avg_valid_loss / len(self.valid_loader)} | acc : {avg_valid_acc / len(self.valid_loader)}")
-        wandb.log({"valid_loss":avg_valid_loss, "valid_acc":avg_valid_acc})
+        wandb.log({"valid_loss":avg_valid_loss/len(self.valid_loader), "valid_acc":avg_valid_acc/len(self.valid_loader)})
