@@ -8,6 +8,9 @@ import math
 import torch.backends.cuda as cuda
 import wandb
 import inspect
+from torch.utils.data import DataLoader
+
+from data_utils import collate_fn, SortedSampler
 
 class CheckpointManager:
     def __init__(self, expdir, metric):
@@ -139,10 +142,11 @@ class WarmupScheduler:
 
 
 class Trainer:
-    def __init__(self, model, train_loader, valid_loader, device, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, weight_decay, resume_from_checkpoint=None, logging_freq=100, logger=None):
-        self.train_loader = train_loader
-        self.valid_loader = valid_loader
-        self.device = device
+    def __init__(self, model, train_dataset, valid_dataset, max_frames, batch_size, config, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, weight_decay, resume_from_checkpoint=None, logging_freq=100, step_to_start_layer_drop=10000, logger=None):
+        
+        self.max_frames = max_frames
+        self.batch_size = batch_size
+        self.config = config
         self.expdir = expdir
         self.accum_grad = accum_grad
         self.max_epoch = max_epoch
@@ -154,13 +158,24 @@ class Trainer:
         self.learning_rate = learning_rate
         self.warmup_steps = warmup_steps
         self.weight_decay = weight_decay
+        self.step_to_start_layer_drop = step_to_start_layer_drop
         self.logger = logger
+    
+        
+        train_sampler = SortedSampler(train_dataset, max_frames, batch_size, seed=42, stft_center=config.center, win_length=config.win_length, hop_length=config.hop_length)
+        valid_sampler = SortedSampler(valid_dataset, max_frames, batch_size, seed=42, stft_center=config.center, win_length=config.win_length, hop_length=config.hop_length)
+        
+        self.train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True, shuffle=False)
+        self.valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True, shuffle=False)
+
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        print("using device : ", self.device)
         
         self.ckpt_manager = CheckpointManager(expdir, "valid_acc")
         self.metrics = defaultdict(list)
 
-        self.total_steps = ((len(train_loader) * max_epoch) / self.accum_grad)
-        self.optimizer = self.configure_optimizer(weight_decay, learning_rate, device)
+        self.total_steps = ((len(self.train_loader) * max_epoch) / self.accum_grad)
+        self.optimizer = self.configure_optimizer(model, weight_decay, learning_rate, self.device)
         self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
         # self.lr_scheduler = WarmupScheduler(base_lr=learning_rate, warmup_steps=warmup_steps)
 
@@ -169,12 +184,15 @@ class Trainer:
             if loaded:
                 model, self.optimizer, self.lr_scheduler, self.step = loaded
             else:
-                model = model.to(device)
+                model = model.to(self.device)
                 self.step = 0
-            self.last_epoch = int(((self.total_steps - self.step) * self.accum_grad) // len(train_loader))
+            self.last_epoch = int(((self.total_steps - self.step) * self.accum_grad) // len(self.train_loader))
         else:
-            model = model.to(device)
+            self.last_epoch = 0
+            model = model.to(self.device)
             self.step = 0
+        
+        self.layer_drop = False
         
         # try:
         #     print("torch torch.compile() ...")
@@ -208,8 +226,8 @@ class Trainer:
         return total_grad_norm ** (1 / norm_type)
     
     
-    def configure_optimizer(self, weight_decay, lr, device):
-        params = {name:p for name, p in self.named_parameters() if p.requires_grad()}
+    def configure_optimizer(self, model, weight_decay, lr, device):
+        params = {name:p for name, p in model.named_parameters() if p.requires_grad}
         decayed_params = [p for p in params.values() if p.dim()>=2]
         non_decayed_params = [p for p in params.values() if p.dim()<2]
         
@@ -246,7 +264,7 @@ class Trainer:
             )
 
             with torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype):
-                _, loss, acc = self.model(speech, speech_lengths, y)
+                _, loss, acc = self.model(speech, speech_lengths, y, stochastic_depth=self.layer_drop)
 
             train_loss += loss.item()
             train_acc += acc
@@ -259,7 +277,7 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm_threshold)
 
                 lr = self.lr_scheduler.step()
-                for param_group in self.optimizer.param_groups():
+                for param_group in self.optimizer.param_groups:
                     param_group["lr"] = lr
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -274,6 +292,9 @@ class Trainer:
 
                 train_loss, train_acc = 0, 0
                 self.step += 1
+                if self.step == self.step_to_start_layer_drop:
+                    self.layer_drop = True
+                    print(f"staring stochastic layer drop during training with p={self.model.stochastic_depth_p}")
 
                 if self.step % self.logging_freq == 0:
                     print(f"epoch: {epoch + 1}/{self.max_epoch} | batch: {batch_idx + 1}/{len(self.train_loader)} | step: {self.step}/{int(self.total_steps)} | loss: {scaled_loss.item():.4f} | grad Norm: {grad_norm:.4f} | lr: {lr:.2e}")
@@ -293,7 +314,7 @@ class Trainer:
                     batch["tokens"].to(self.device),
                 )
                 with torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype):
-                    _, loss, acc = self.model(speech, speech_lengths, y)
+                    _, loss, acc = self.model(speech, speech_lengths, y, stochastic_depth=False)
 
                 total_valid_loss += loss.item()
                 total_valid_acc += acc

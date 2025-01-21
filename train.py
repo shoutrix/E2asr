@@ -1,9 +1,7 @@
 import os
-import torch
 from data_utils import prepare_datasets, collate_fn, SortedSampler
 from E2asr_model import ASRconfig, E2ASR
-from torch.utils.data import DataLoader
-from trainer import Trainer, CosineScheduler
+from trainer import Trainer
 import wandb
 
 
@@ -12,9 +10,9 @@ data_path = "/speech/shoutrik/torch_exp/E2asr/data/LibriTTS"
 expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_train_large_768_24_12"
 train_set_name = "train"
 valid_set_name = "dev_clean"
-max_frames = 57600
+max_frames = 64000
 batch_size = 96
-max_epoch = 200
+max_epoch = 130
 grad_norm_threshold = 1.0
 save_last_step_freq = 10000
 save_global_step_freq = 40000
@@ -44,6 +42,7 @@ config = ASRconfig(
     num_layers=24,
     max_len=1600,
     stochastic_depth_p=0.1,
+    unskipped_layers=[0,1,2,3,4,5]
 )
 
 wandb.init(
@@ -66,22 +65,15 @@ wandb.init(
 )
 
 train_dataset, valid_dataset, stoi, itos, sp = prepare_datasets(data_path, train_set_name, valid_set_name, expdir)
-train_sampler = SortedSampler(train_dataset, max_frames, batch_size, seed=42, stft_center=config.center, win_length=config.win_length, hop_length=config.hop_length)
-valid_sampler = SortedSampler(valid_dataset, max_frames, batch_size, seed=42, stft_center=config.center, win_length=config.win_length, hop_length=config.hop_length)
-train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True, shuffle=False)
-valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True, shuffle=False)
-
 vocab_size = len(stoi) + 1
 model = E2ASR(config, vocab_size, training=True)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print("using device : ", device)
-model.to(device)
-
 
 trainer = Trainer(model=model,
-                  train_loader=train_loader,
-                  valid_loader=valid_loader,
-                  device=device,
+                  train_dataset=train_dataset,
+                  valid_dataset=valid_dataset,
+                  max_frames=max_frames,
+                  batch_size=batch_size,
+                  config=config,
                   expdir=expdir,
                   accum_grad=accum_grad,
                   max_epoch=max_epoch,
@@ -94,6 +86,7 @@ trainer = Trainer(model=model,
                   learning_rate=learning_rate,
                   warmup_steps=warmup_steps,
                   weight_decay=weight_decay,
+                  step_to_start_layer_drop=50000,
                   logger="wandb"
                   )
 
