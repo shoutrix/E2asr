@@ -7,3 +7,4 @@ pycache/
 __pycache__/
 test.py
 E2asr_model_bkp.py
+learning_rate_schedule.png plot.py train_overfit.py train_torch_encoder.py
