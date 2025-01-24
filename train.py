@@ -7,7 +7,7 @@ import wandb
 
 # HYPER PARAMETERS
 data_path = "/speech/shoutrik/torch_exp/E2asr/data/LibriTTS"
-expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_train_large_768_24_12"
+expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_train_large_768_24_12_SLD"
 train_set_name = "train"
 valid_set_name = "dev_clean"
 max_frames = 64000
@@ -22,6 +22,7 @@ accum_grad=2
 learning_rate = 2e-4
 warmup_steps = 40000
 weight_decay=0.1
+
 config = ASRconfig(
     sample_rate= 16000,
     n_fft=512,
@@ -42,13 +43,13 @@ config = ASRconfig(
     num_layers=24,
     max_len=1600,
     stochastic_depth_p=0.1,
-    unskipped_layers=[0,1,2,3,4,5]
+    unskipped_layers=[0,1,2,3,4,5,21,22,23],
 )
 
 wandb.init(
     project="E2asr",
     name=os.path.basename(expdir),
-    id=wandb.util.generate_id(),
+    id="ay669h5r",
     resume="allow",
     config={
         "epochs": max_epoch,
@@ -79,7 +80,7 @@ trainer = Trainer(model=model,
                   max_epoch=max_epoch,
                   save_last_step_freq=save_last_step_freq,
                   save_global_step_freq=save_global_step_freq,
-                  resume_from_checkpoint=None,
+                  resume_from_checkpoint=True,
                   logging_freq=logging_freq,
                   grad_norm_threshold=grad_norm_threshold,
                   seed=seed,

@@ -14,6 +14,7 @@ from data_utils import collate_fn, SortedSampler
 
 class CheckpointManager:
     def __init__(self, expdir, metric):
+        self.expdir = expdir
         self.ckpt_dir = os.path.join(expdir, "checkpoint")
         os.makedirs(self.ckpt_dir, exist_ok=True)
         self.param = metric
@@ -57,21 +58,50 @@ class CheckpointManager:
         }
         torch.save(checkpoint, ckpt_path)
         print(f"Checkpoint saved to {ckpt_path}")
+        
+    def load_(self, model, optimizer=None, lr_scheduler=None, device='cuda'):
+        checkpoint_dir = os.path.join(self.expdir, "checkpoint")
+        all_ckpts = [p for p in os.listdir(checkpoint_dir) if p.endswith(".pt")]
 
-    def load_(self, ckpt_path, model, optimizer=None, lr_scheduler=None):
-        if not os.path.exists(ckpt_path):
-            print(f"Checkpoint path {ckpt_path} does not exist.")
+        if len(all_ckpts) < 1:
+            print(f"No checkpoint found at {checkpoint_dir}\n")
             return None
-        checkpoint = torch.load(ckpt_path)
+        else:
+            ckpt_path = os.path.join(checkpoint_dir, "checkpoint_last.pt")
+            if not os.path.exists(ckpt_path):
+                # If checkpoint_last.pt is not available, find the one with the highest step
+                ckpt_step_map = {
+                    int(p.split("_")[-1].split(".")[0]): os.path.join(checkpoint_dir, p)
+                    for p in all_ckpts if "checkpoint_step_" in p
+                }
+                if len(ckpt_step_map) > 0:
+                    max_step = max(ckpt_step_map.keys())
+                    ckpt_path = ckpt_step_map[max_step]
+                else:
+                    print(f"No valid step checkpoint found in {checkpoint_dir}\n")
+                    return None
+
+            # Load the checkpoint
+            print(f"Loading checkpoint from {ckpt_path}")
+            checkpoint = torch.load(ckpt_path, map_location=device)
+
+            
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        model.to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
         if optimizer is not None:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])        
+            for state in optimizer.state.values():
+                if isinstance(state, dict):
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(device)
+
         if lr_scheduler is not None:
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         
         step = checkpoint['step']
-        
         print(f"Checkpoint loaded from {ckpt_path}")
         return model, optimizer, lr_scheduler, step
 
@@ -142,7 +172,7 @@ class WarmupScheduler:
 
 
 class Trainer:
-    def __init__(self, model, train_dataset, valid_dataset, max_frames, batch_size, config, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, weight_decay, resume_from_checkpoint=None, logging_freq=100, step_to_start_layer_drop=10000, logger=None):
+    def __init__(self, model, train_dataset, valid_dataset, max_frames, batch_size, config, expdir, accum_grad, max_epoch, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, weight_decay, resume_from_checkpoint=False, logging_freq=100, step_to_start_layer_drop=10000, logger=None):
         
         self.max_frames = max_frames
         self.batch_size = batch_size
@@ -179,14 +209,14 @@ class Trainer:
         self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
         # self.lr_scheduler = WarmupScheduler(base_lr=learning_rate, warmup_steps=warmup_steps)
 
-        if resume_from_checkpoint:
-            loaded = self.ckpt_manager.load_(resume_from_checkpoint, model, self.optimizer, self.lr_scheduler)
+        if resume_from_checkpoint is True:
+            loaded = self.ckpt_manager.load_(model, self.optimizer, self.lr_scheduler, device=self.device)
             if loaded:
                 model, self.optimizer, self.lr_scheduler, self.step = loaded
             else:
                 model = model.to(self.device)
                 self.step = 0
-            self.last_epoch = int(((self.total_steps - self.step) * self.accum_grad) // len(self.train_loader))
+            self.last_epoch = int(self.step * self.accum_grad) // len(self.train_loader)
         else:
             self.last_epoch = 0
             model = model.to(self.device)
@@ -235,7 +265,7 @@ class Trainer:
             {"params":decayed_params, "weight_decay":weight_decay},
             {"params":non_decayed_params, "weight_decay":0}
         ]
-        if "fused" in inspect.signature(torch.optim.AdamW).parameters and device=="cuda":
+        if "fused" in inspect.signature(torch.optim.AdamW).parameters and device==torch.device("cuda"):
             use_fused = True
         else:
             use_fused = False
@@ -294,7 +324,7 @@ class Trainer:
                 self.step += 1
                 if self.step == self.step_to_start_layer_drop:
                     self.layer_drop = True
-                    print(f"staring stochastic layer drop during training with p={self.model.stochastic_depth_p}")
+                    print(f"staring stochastic layer drop during training with p={self.model.config.stochastic_depth_p}")
 
                 if self.step % self.logging_freq == 0:
                     print(f"epoch: {epoch + 1}/{self.max_epoch} | batch: {batch_idx + 1}/{len(self.train_loader)} | step: {self.step}/{int(self.total_steps)} | loss: {scaled_loss.item():.4f} | grad Norm: {grad_norm:.4f} | lr: {lr:.2e}")

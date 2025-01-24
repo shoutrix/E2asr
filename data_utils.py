@@ -47,8 +47,8 @@ class ASRdataset(Dataset):
 
 
 def prepare_text_vocab(train_set, dump_dir):
-    os.makedirs(dump_dir)
-    dump_text_path = dump_dir / "dump_text.txt"
+    os.makedirs(dump_dir, exist_ok=True)
+    dump_text_path = os.path.join(dump_dir, "dump_text.txt")
     
     all_text = train_set["text"].to_pylist()
     with open(dump_text_path, "w", encoding="utf-8") as f:
@@ -56,16 +56,16 @@ def prepare_text_vocab(train_set, dump_dir):
     
     spm.SentencePieceTrainer.train(
         input=dump_text_path,
-        model_prefix=dump_dir / "spm", 
+        model_prefix=os.path.join(dump_dir, "spm"), 
         model_type="char",
         character_coverage=1.0,
         user_defined_symbols=["<sos>", "<eos>"]
     )
     
     sp = spm.SentencePieceProcessor()
-    sp.load(str(dump_dir / "spm.model"))
+    sp.load(os.path.join(dump_dir, "spm.model"))
     
-    with open(dump_dir / "spm.vocab", "r", encoding="utf-8") as f:
+    with open(os.path.join(dump_dir, "spm.vocab"), "r", encoding="utf-8") as f:
         vocab = f.read().splitlines()
     
     stoi = {line.split()[0]: i for i, line in enumerate(vocab)}
@@ -76,11 +76,12 @@ def prepare_text_vocab(train_set, dump_dir):
 def prepare_datasets(data_path, train_set_name, valid_set_name, expdir):
     
     # TODO don't delete old experiments
-    expdir = Path(expdir)
-    if expdir.exists():
-        print(f"experiment dir already exists : {expdir}. Removing it.")
-        shutil.rmtree(expdir)
-    os.makedirs(expdir)
+    # expdir = Path(expdir)
+    # if expdir.exists():
+        
+    #     print(f"experiment dir already exists : {expdir}. Renaming it to {}")
+    #     shutil.rmtree(expdir)
+    os.makedirs(expdir, exist_ok=True)
     
     data_path = Path(data_path)
     
@@ -90,7 +91,7 @@ def prepare_datasets(data_path, train_set_name, valid_set_name, expdir):
     for name in ["id_", "duration", "path", "text"]:
         assert name in train_set.schema.names
     
-    dump_dir = expdir / "dump"
+    dump_dir = os.path.join(expdir, "dump")
     sp, stoi, itos = prepare_text_vocab(train_set, dump_dir)
     
     train_set = ASRdataset(train_set, stoi, sp)

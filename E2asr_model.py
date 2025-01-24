@@ -25,7 +25,9 @@ class ASRconfig:
     num_heads: int = 12
     num_layers: int = 24
     max_len: int = 4992
-    stochastic_depth_p: float = 0.2
+    stochastic_depth_p: float = 0.1
+    unskipped_layers: list = None
+    
 
     def validate(self):
         assert self.model_dim % self.num_heads == 0, "model_dim should be divisible by num_heads"
@@ -227,7 +229,7 @@ class MultiheadAttention(nn.Module):
 
         # print(querry.shape, key.shape, value.shape, attn_mask.shape)
         
-        attn_mask = generate_attention_mask(lens)
+        attn_mask = generate_attention_mask(lens, k=self.config.num_heads)
 
         if hasattr(nn.functional, "scaled_dot_product_attention"):
             out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p, attn_mask=attn_mask)
@@ -269,24 +271,26 @@ class TransformerEncoder(nn.Module):
         self.positional_encoding = LearnablePositionalEncoding(config)
         self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
         self.norm = nn.LayerNorm(config.model_dim)
-        self.stochastic_depth_p = config.stochastic_depth_p
+        self.stochastic_depth_p = self.config.stochastic_depth_p
 
     def forward(self, x, lengths, stochastic_depth):
         input_feats, feat_lengths = self.input_layer(x, lengths)
         x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
         # attn_mask = generate_attention_mask(feat_lengths, self.config.num_heads)
-        executed_any_layer = False
+        # executed_any_layer = False
         for i, layer in enumerate(self.layers):
             if i not in self.config.unskipped_layers and stochastic_depth and torch.rand(1).item() < self.stochastic_depth_p:
                 continue
             x = layer(x, feat_lengths)
-            executed_any_layer = True
-        if not executed_any_layer:
-            x = self.layers[-1](x, feat_lengths)
+            # executed_any_layer = True
+        # if not executed_any_layer:
+        #     x = self.layers[-1](x, feat_lengths)
+        return self.norm(x)
 
 class E2ASR(nn.Module):
     def __init__(self, config, vocab_size, training=True):
         super().__init__()
+        self.config = config
         self.feature_extractor = AudioFeatureExtractor(config)
         self.specaug = SpecAugment(config)
         self.normalization = GlobalMVN(config)
