@@ -132,7 +132,6 @@ class Conv2dSubsampling(nn.Module):
             nn.Dropout(p=config.dropout),
             nn.Conv2d(config.model_dim, config.model_dim, 3, 2),
             nn.GELU(),
-            nn.Dropout(p=config.dropout),
         )
         
         self.get_out_len = lambda x: (((x - 1) // 2) - 1) // 2
@@ -173,17 +172,17 @@ class SinusoidalPositionalEmbedding(nn.Module):
         return self.positional_encodings[:seq_len].to(device)
 
 
-class LearnablePositionalEncoding(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.model_dim = config.model_dim
-        self.max_len = config.max_len
-        self.positional_encodings = nn.Embedding(self.max_len, self.model_dim)
-        nn.init.normal_(self.positional_encodings.weight, mean=0, std=0.02)
+# class LearnablePositionalEncoding(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.model_dim = config.model_dim
+#         self.max_len = config.max_len
+#         self.positional_encodings = nn.Embedding(self.max_len, self.model_dim)
+#         nn.init.normal_(self.positional_encodings.weight, mean=0, std=0.02)
 
-    def forward(self, seq_len, device):
-        positions = torch.arange(0, seq_len, dtype=torch.long, device=device)
-        return self.positional_encodings(positions)
+#     def forward(self, seq_len, device):
+#         positions = torch.arange(0, seq_len, dtype=torch.long, device=device)
+#         return self.positional_encodings(positions)
 
 
 
@@ -233,19 +232,21 @@ class MultiheadAttention(nn.Module):
 
         if hasattr(nn.functional, "scaled_dot_product_attention"):
             out = F.scaled_dot_product_attention(querry, key, value, dropout_p=self.dropout_p, attn_mask=attn_mask)
-
         else:
-            scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
-            score = torch.matmul(self.qk_scale * querry, self.qk_scale * key.transpose(2,3)) * scale
-            score = score.float() + attn_mask
-            norm_score = F.softmax(score, dim=-1).to(querry.dtype)
-            # norm_score = norm_score * attn_mask
-            norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
-            out = torch.matmul(norm_score, value)
+            out = self.scaled_dot_product_attention(querry, key, value, attn_mask)
         
         out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1)
         return self.out_proj(out)
-        
+    
+    def scaled_dot_product_attention(self, querry, key, value, attn_mask):
+        scale = 1 / math.sqrt(self.config.model_dim // self.config.num_heads)
+        score = torch.matmul(self.qk_scale * querry, self.qk_scale * key.transpose(2,3)) * scale
+        score = score.float() + attn_mask
+        norm_score = F.softmax(score, dim=-1).to(querry.dtype)
+        norm_score = F.dropout(norm_score, p = self.dropout_p, training=self.training)
+        out = torch.matmul(norm_score, value)
+        return out
+
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, config):
@@ -254,13 +255,12 @@ class TransformerEncoderLayer(nn.Module):
         self.self_attn = MultiheadAttention(config)
         self.norm2 = nn.LayerNorm(config.model_dim)
         self.feed_forward = PositionWiseFeedForward(config)
-        self.norm_out = nn.LayerNorm(config.model_dim)
-        self.residual_scale = 2 / math.sqrt(config.num_layers)
+        self.residual_scale = 1
 
     def forward(self, x, lens):
         x = x + self.residual_scale * self.self_attn(self.norm1(x), lens)
         x = x + self.residual_scale * self.feed_forward(self.norm2(x))
-        return self.norm_out(x)
+        return x
 
 
 class TransformerEncoder(nn.Module):
@@ -268,24 +268,20 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.input_layer = Conv2dSubsampling(config)
-        self.positional_encoding = LearnablePositionalEncoding(config)
+        self.positional_encoding = SinusoidalPositionalEmbedding(config)
         self.layers = nn.ModuleList([TransformerEncoderLayer(config) for _ in range(config.num_layers)])
         self.norm = nn.LayerNorm(config.model_dim)
         self.stochastic_depth_p = self.config.stochastic_depth_p
-
+        
     def forward(self, x, lengths, stochastic_depth):
         input_feats, feat_lengths = self.input_layer(x, lengths)
         x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
-        # attn_mask = generate_attention_mask(feat_lengths, self.config.num_heads)
-        # executed_any_layer = False
         for i, layer in enumerate(self.layers):
             if i not in self.config.unskipped_layers and stochastic_depth and torch.rand(1).item() < self.stochastic_depth_p:
                 continue
             x = layer(x, feat_lengths)
-            # executed_any_layer = True
-        # if not executed_any_layer:
-        #     x = self.layers[-1](x, feat_lengths)
         return self.norm(x)
+
 
 class E2ASR(nn.Module):
     def __init__(self, config, vocab_size, training=True):
@@ -299,6 +295,7 @@ class E2ASR(nn.Module):
         self.loss_fn = nn.CrossEntropyLoss()
         self.initialize_parameters()
 
+
     def forward(self, speech, speech_lengths, y, stochastic_depth=False):
         feats, frame_lengths, padding_mask = self.feature_extractor(speech, speech_lengths)
         if self.training:
@@ -311,7 +308,6 @@ class E2ASR(nn.Module):
         return logits, loss, acc
 
     def compute_masked_cross_entropy_loss_and_acc(self, logits, y):
-        y = y + 1
         B, T, d = logits.shape
         y = F.pad(y, (0, T - y.shape[1]), "constant", 0).flatten()
         y_mask = y != 0
@@ -320,23 +316,29 @@ class E2ASR(nn.Module):
         loss = self.loss_fn(logits_flat, y_flat)
         acc = (logits_flat.argmax(dim=-1) == y_flat).float().mean().item()
         return loss, acc
-
+    
     def initialize_parameters(self):
+        print("\n\nInitializing parameters...")
+        residual_scale = 1 / math.sqrt(2 * self.config.num_layers)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-                m.weight.data.mul_(0.45)
             elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='linear')
-                m.weight.data.mul_(0.45)
+                nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0, std=0.02)
-        nn.init.xavier_uniform_(self.pred_head.weight)
-        nn.init.constant_(self.pred_head.bias, 0)
+
+        for m in self.modules():
+            if isinstance(m, MultiheadAttention):
+                for name, param in m.named_parameters():
+                    if "q.weight" in name or "k.weight" in name or "v.weight" in name or "out_proj.weight" in name:
+                        param.data *= residual_scale
+            elif isinstance(m, PositionWiseFeedForward):
+                for sub_module in m.mod:
+                    if isinstance(sub_module, nn.Linear):
+                        sub_module.weight.data *= residual_scale
