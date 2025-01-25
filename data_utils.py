@@ -47,20 +47,21 @@ class ASRdataset(Dataset):
 
 
 def prepare_text_vocab(train_set, dump_dir):
-    os.makedirs(dump_dir, exist_ok=True)
-    dump_text_path = os.path.join(dump_dir, "dump_text.txt")
-    
-    all_text = train_set["text"].to_pylist()
-    with open(dump_text_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(all_text))
-    
-    spm.SentencePieceTrainer.train(
-        input=dump_text_path,
-        model_prefix=os.path.join(dump_dir, "spm"), 
-        model_type="char",
-        character_coverage=1.0,
-        user_defined_symbols=["<sos>", "<eos>"]
-    )
+    if not os.path.exists(os.path.join(dump_dir, "spm.model")) or not os.path.exists(os.path.join(dump_dir, "spm.vocab")):
+        os.makedirs(dump_dir, exist_ok=True)
+        dump_text_path = os.path.join(dump_dir, "dump_text.txt")
+        
+        all_text = train_set["text"].to_pylist()
+        with open(dump_text_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(all_text))
+        
+        spm.SentencePieceTrainer.train(
+            input=dump_text_path,
+            model_prefix=os.path.join(dump_dir, "spm"), 
+            model_type="char",
+            character_coverage=1.0,
+            user_defined_symbols=["<sos>", "<eos>"]
+        )
     
     sp = spm.SentencePieceProcessor()
     sp.load(os.path.join(dump_dir, "spm.model"))
@@ -68,7 +69,7 @@ def prepare_text_vocab(train_set, dump_dir):
     with open(os.path.join(dump_dir, "spm.vocab"), "r", encoding="utf-8") as f:
         vocab = f.read().splitlines()
     
-    stoi = {line.split()[0]: i for i, line in enumerate(vocab)}
+    stoi = {line.split()[0]: i+1 for i, line in enumerate(vocab)}
     itos = {v: k for k, v in stoi.items()}
     return sp, stoi, itos
 
@@ -101,9 +102,11 @@ def prepare_datasets(data_path, train_set_name, valid_set_name, expdir):
 
 
 class SortedSampler(Sampler[list[int]]):
-    def __init__(self, data_source, max_frames, batch_size, seed, stft_center, win_length, hop_length):
+    def __init__(self, data_source, max_frames, batch_size, seed, stft_center, win_length, hop_length, rank, world_size):
         self.data_source = data_source
         self.seed = seed
+        self.rank = rank
+        self.world_size = world_size
         
         def get_frame_length(dur):
             ilen = dur * TARGET_SAMPLE_RATE
@@ -129,10 +132,11 @@ class SortedSampler(Sampler[list[int]]):
                 batch = [i]
                 batch_length = len_
         
-        self.batches = batches
-        if seed:
-            random.seed(seed)
-            random.shuffle(self.batches)
+
+        random.shuffle(batches)
+        batches_per_gpu = len(batches) // world_size
+        self.batches = batches[rank*batches_per_gpu : (rank+1)*batches_per_gpu]
+        
     
     def __iter__(self):
         return iter(self.batches)
@@ -149,10 +153,11 @@ def collate_fn(batch):
     lengths = [b["length"] for b in batch]
     
     speech = torch.nn.utils.rnn.pad_sequence(speech, batch_first=True, padding_value=0.0)
-    text = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=-1)
+    text = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=0)
     lengths = torch.tensor(lengths)
     
     return {
+        "ids_": ids_,
         "speech": speech,
         "tokens": text,
         "lengths": lengths
