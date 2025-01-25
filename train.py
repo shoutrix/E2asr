@@ -11,16 +11,16 @@ expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_trial03"
 train_set_name = "train"
 valid_set_name = "dev_clean"
 max_frames = 64000
-batch_size = 96
-max_epoch = 300
+batch_size = 128
+max_epoch = 150
 grad_norm_threshold = 1.0
 save_last_step_freq = 10000
 save_global_step_freq = 40000
-logging_freq = 500
+logging_freq = 100
 seed=42
-accum_grad=4
-learning_rate = 2e-3
-warmup_steps = 80000
+accum_grad=2
+learning_rate = 2e-4
+warmup_steps = 20000
 weight_decay=0.1
 
 config = ASRconfig(
@@ -86,7 +86,7 @@ trainer = Trainer(model=model,
                   run_id=run_id,
                   resume=resume,
                   dataloader_num_workers=4,
-                  ddp=True,
+                  ddp=False,
                   )
 
 trainer.train()

@@ -58,7 +58,8 @@ def prepare_text_vocab(train_set, dump_dir):
         spm.SentencePieceTrainer.train(
             input=dump_text_path,
             model_prefix=os.path.join(dump_dir, "spm"), 
-            model_type="char",
+            model_type="bpe",
+            vocab_size=500,
             character_coverage=1.0,
             user_defined_symbols=["<sos>", "<eos>"]
         )

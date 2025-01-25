@@ -132,6 +132,44 @@ class CosineScheduler:
         self.current_step = state_dict['current_step']
 
 
+class ExponentialScheduler:
+    def __init__(self, base_lr, warmup_steps, total_steps, decay_rate=0.995):
+        self.base_lr = base_lr
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.decay_rate = decay_rate
+        self.current_step = 0
+
+    def get_lr(self):
+        if self.current_step < self.warmup_steps:
+            return self.base_lr * (self.current_step / self.warmup_steps)
+        else:
+            decay_steps = self.current_step - self.warmup_steps
+            total_decay_steps = self.total_steps - self.warmup_steps
+            decay_factor = math.exp(-self.decay_rate * (decay_steps / total_decay_steps))
+            return self.base_lr * decay_factor
+
+    def step(self):
+        self.current_step += 1
+        return self.get_lr()
+
+    def state_dict(self):
+        return {
+            'base_lr': self.base_lr,
+            'warmup_steps': self.warmup_steps,
+            'total_steps': self.total_steps,
+            'decay_rate': self.decay_rate,
+            'current_step': self.current_step
+        }
+
+    def load_state_dict(self, state_dict):
+        self.base_lr = state_dict['base_lr']
+        self.warmup_steps = state_dict['warmup_steps']
+        self.total_steps = state_dict['total_steps']
+        self.decay_rate = state_dict['decay_rate']
+        self.current_step = state_dict['current_step']
+
+
 class Trainer:
     def __init__(self, model, train_dataset, valid_dataset, max_frames, batch_size, config, expdir, accum_grad, max_epoch, idx_to_char_map, grad_norm_threshold, save_last_step_freq, save_global_step_freq, seed, learning_rate, warmup_steps, weight_decay, resume_from_checkpoint=False, logging_freq=100, step_to_start_layer_drop=10000, logger=None, wandb_project=None, wandb_run_name=None, run_id=None, resume=None, dataloader_num_workers=1, ddp=False):
         
@@ -176,7 +214,7 @@ class Trainer:
 
         self.total_steps = (len(self.train_loader) * max_epoch) // self.accum_grad
         self.optimizer = self.configure_optimizer(model, weight_decay, learning_rate, self.device)
-        self.lr_scheduler = CosineScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
+        self.lr_scheduler = ExponentialScheduler(base_lr=learning_rate, warmup_steps=warmup_steps, total_steps=self.total_steps)
         # self.lr_scheduler = WarmupScheduler(base_lr=learning_rate, warmup_steps=warmup_steps)
 
         if resume_from_checkpoint is True:
@@ -357,7 +395,7 @@ class Trainer:
                 with torch.autocast(device_type=self.device, dtype=self.autocast_dtype):
                     logits, loss, acc = self.model(speech, speech_lengths, y, stochastic_depth=False)
 
-                total_valid_loss += loss.item()
+                total_valid_loss += loss
                 total_valid_acc += acc
 
         avg_valid_loss = total_valid_loss / len(self.valid_loader)
@@ -374,10 +412,14 @@ class Trainer:
                 "valid_loss": avg_valid_loss.item(),
                 "valid_acc": avg_valid_acc,
             })
+            
+
             with open(os.path.join(self.expdir, "logs", f"{epoch+1}_samples.log"), "w") as f:
                 ids_ = batch["ids_"]
-                ref = ["".join([self.idx_to_char_map[idx] for idx in sample]) for sample in batch["tokens"]]
+                ref = ["".join([self.idx_to_char_map.get(idx, "<f>") for idx in sample]) for sample in batch["tokens"]]
                 predicted = logits.argmax(dim=-1)
-                hyp = ["".join([self.idx_to_char_map[idx] for idx in sample]) for sample in predicted]
+                hyp = ["".join([self.idx_to_char_map.get(idx, "<f>") for idx in sample]) for sample in predicted]
                 for id_, r, h in zip(ids_, ref, hyp):
                     f.write(f"{id_}\nREF : {r}\nHYP : {h}\n")
+            print(batch["tokens"])
+            print(predicted)
