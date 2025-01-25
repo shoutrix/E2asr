@@ -1,6 +1,8 @@
-numpy==1.26.4
+numpy==2.2.2
 pandas==2.2.3
+pyarrow==18.1.0
 sentencepiece==0.2.0
-torch==1.12.1+cu113
-torchaudio==0.12.1+cu113
+soundfile==0.13.0
+torch==2.5.1
+torchaudio==2.5.1
 tqdm==4.67.1
