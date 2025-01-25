@@ -275,6 +275,7 @@ class TransformerEncoder(nn.Module):
         
     def forward(self, x, lengths, stochastic_depth):
         input_feats, feat_lengths = self.input_layer(x, lengths)
+        # print("feat lengths after conv subsampling : ", feat_lengths)
         x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
         for i, layer in enumerate(self.layers):
             if i not in self.config.unskipped_layers and stochastic_depth and torch.rand(1).item() < self.stochastic_depth_p:
@@ -298,6 +299,8 @@ class E2ASR(nn.Module):
 
     def forward(self, speech, speech_lengths, y, stochastic_depth=False):
         feats, frame_lengths, padding_mask = self.feature_extractor(speech, speech_lengths)
+        # print("frame lengths : ", frame_lengths)
+        # print("text tokens : ", y)
         if self.training:
             feats = self.specaug(feats)
         feats = feats.transpose(1, 2)
@@ -308,25 +311,29 @@ class E2ASR(nn.Module):
         return logits, loss, acc
 
     def compute_masked_cross_entropy_loss_and_acc(self, logits, y):
+        # print(logits.shape, y.shape)
         B, T, d = logits.shape
         y = F.pad(y, (0, T - y.shape[1]), "constant", 0).flatten()
         y_mask = y != 0
         logits_flat = logits.view(-1, logits.shape[-1])[y_mask]
         y_flat = y[y_mask]
+        # print(logits_flat.shape, y_flat.shape)
         loss = self.loss_fn(logits_flat, y_flat)
         acc = (logits_flat.argmax(dim=-1) == y_flat).float().mean().item()
+        # print("logits : ", logits_flat.argmax(dim=-1))
+        # print("ground truth : ", y_flat)
         return loss, acc
     
     def initialize_parameters(self):
-        print("\n\nInitializing parameters...")
+        print("\n\ninitializing parameters...")
         residual_scale = 1 / math.sqrt(2 * self.config.num_layers)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='linear')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
