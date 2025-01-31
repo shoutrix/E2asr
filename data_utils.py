@@ -59,7 +59,7 @@ def prepare_text_vocab(train_set, dump_dir):
             input=dump_text_path,
             model_prefix=os.path.join(dump_dir, "spm"), 
             model_type="bpe",
-            vocab_size=500,
+            vocab_size=300,
             character_coverage=1.0,
             user_defined_symbols=["<sos>", "<eos>"]
         )
@@ -144,7 +144,29 @@ class SortedSampler(Sampler[list[int]]):
 
     def __len__(self):
         return len(self.batches)
-            
+
+class UnsortedSampler(Sampler[list[int]]):
+    def __init__(self, data_source, max_frames, batch_size, seed, stft_center, win_length, hop_length, rank, world_size):
+        self.data_source = data_source
+        self.seed = seed
+        self.rank = rank
+        self.world_size = world_size
+
+        print(f"Setting up Unsorted batch sampler with fixed batch size: {batch_size}")
+
+        total_samples = len(self.data_source.data.column("duration"))
+        indices = list(range(total_samples))
+        random.shuffle(indices)
+
+        batches = [indices[i : i + batch_size]for i in range(0, len(indices), batch_size)]
+        batches_per_gpu = len(batches) // world_size
+        self.batches = batches[rank * batches_per_gpu : (rank + 1) * batches_per_gpu]
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
     
 
 def collate_fn(batch):

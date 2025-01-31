@@ -3,24 +3,25 @@ from data_utils import prepare_datasets
 from E2asr_model import ASRconfig, E2ASR
 from trainer import Trainer, set_seed
 import wandb
+import torch
 
 
 # HYPER PARAMETERS
 data_path = "/speech/shoutrik/torch_exp/E2asr/data/LibriTTS"
-expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_trial03"
+expdir = "/speech/shoutrik/torch_exp/E2asr/exp/LibriTTS_trial05"
 train_set_name = "train"
 valid_set_name = "dev_clean"
 max_frames = 64000
 batch_size = 128
-max_epoch = 150
+max_epoch = 200
 grad_norm_threshold = 1.0
-save_last_step_freq = 10000
+save_last_step_freq = 2000
 save_global_step_freq = 40000
 logging_freq = 100
 seed=42
-accum_grad=2
+accum_grad=3
 learning_rate = 2e-4
-warmup_steps = 20000
+warmup_steps = 40000
 weight_decay=0.1
 
 config = ASRconfig(
@@ -31,7 +32,7 @@ config = ASRconfig(
     n_mels=80,
     center=True,
     preemphasis=True,
-    normalize_energy=True,
+    normalize_energy=False,
     time_mask_param=30,
     freq_mask_param=15,
     norm_mean=True,
@@ -60,6 +61,7 @@ train_dataset, valid_dataset, stoi, itos, sp = prepare_datasets(data_path, train
 vocab_size = len(stoi) + 1
 model = E2ASR(config, vocab_size, training=True)
 
+
 trainer = Trainer(model=model,
                   train_dataset=train_dataset,
                   valid_dataset=valid_dataset,
@@ -79,7 +81,7 @@ trainer = Trainer(model=model,
                   learning_rate=learning_rate,
                   warmup_steps=warmup_steps,
                   weight_decay=weight_decay,
-                  step_to_start_layer_drop=50000,
+                  step_to_start_layer_drop=20000,
                   logger="wandb",
                   wandb_project=wandb_project,
                   wandb_run_name=wandb_run_name,

@@ -4,6 +4,7 @@ import torchaudio.transforms as T
 from dataclasses import dataclass
 import torch.nn.functional as F
 import math
+import wandb
 
 @dataclass
 class ASRconfig:
@@ -75,9 +76,11 @@ class AudioFeatureExtractor(nn.Module):
     def pre_emphasis(self, signal, alpha=0.97):
         return torch.cat((signal[:, :1], signal[:, 1:] - alpha * signal[:, :-1]), dim=1)
     
+
     def energy_normalization(self, mel_spec):
-        energy = torch.sqrt(torch.sum(mel_spec ** 2, dim=1, keepdim=True))
-        return mel_spec / (energy + 1e-10)
+        energy = torch.sqrt(torch.sum(mel_spec**2, dim=2, keepdim=True)) + 1e-10
+        normalized_mel = mel_spec / energy
+        return normalized_mel
     
     def forward(self, x, lengths):
         if self.preemphasis:
@@ -252,14 +255,14 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.norm1 = nn.LayerNorm(config.model_dim)
-        self.self_attn = MultiheadAttention(config)
+        self.self_attn = MultiheadAttention(config, training=True)
         self.norm2 = nn.LayerNorm(config.model_dim)
         self.feed_forward = PositionWiseFeedForward(config)
         self.residual_scale = 1
 
     def forward(self, x, lens):
-        x = x + self.residual_scale * self.self_attn(self.norm1(x), lens)
-        x = x + self.residual_scale * self.feed_forward(self.norm2(x))
+        x = x + self.self_attn(self.norm1(x), lens)
+        x = x + self.feed_forward(self.norm2(x))
         return x
 
 
@@ -275,12 +278,14 @@ class TransformerEncoder(nn.Module):
         
     def forward(self, x, lengths, stochastic_depth):
         input_feats, feat_lengths = self.input_layer(x, lengths)
+        wandb.log({"conv_subsampling.std":input_feats.std()})
         # print("feat lengths after conv subsampling : ", feat_lengths)
         x = input_feats + self.positional_encoding(input_feats.shape[1], input_feats.device)
         for i, layer in enumerate(self.layers):
             if i not in self.config.unskipped_layers and stochastic_depth and torch.rand(1).item() < self.stochastic_depth_p:
                 continue
             x = layer(x, feat_lengths)
+            wandb.log({f"encoder_layer{i}.std":x.std()})
         return self.norm(x)
 
 
@@ -295,6 +300,9 @@ class E2ASR(nn.Module):
         self.pred_head = nn.Linear(config.model_dim, vocab_size)
         self.loss_fn = nn.CrossEntropyLoss()
         self.initialize_parameters()
+
+        # k_weight = self.encoder.layers[0].self_attn.q.weight
+        # print(k_weight.std())
 
 
     def forward(self, speech, speech_lengths, y, stochastic_depth=False):
@@ -323,6 +331,13 @@ class E2ASR(nn.Module):
         # print("logits : ", logits_flat.argmax(dim=-1))
         # print("ground truth : ", y_flat)
         return loss, acc
+        
+    def log_grad_norms(self, step):
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm(2).item()
+                wandb.log({f"grad_norm_{name}": grad_norm})
+
     
     def initialize_parameters(self):
         print("\n\ninitializing parameters...")

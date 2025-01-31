@@ -10,7 +10,7 @@ import wandb
 import inspect
 from torch.utils.data import DataLoader
 
-from data_utils import collate_fn, SortedSampler
+from data_utils import collate_fn, SortedSampler, UnsortedSampler
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group, all_reduce
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -79,7 +79,7 @@ class CheckpointManager:
             checkpoint = torch.load(ckpt_path, map_location=device)
 
             
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
         model.to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
@@ -239,9 +239,11 @@ class Trainer:
         self.layer_drop = False
         
         self.autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        torch.set_float32_matmul_precision("high")
         if self.master_process:
             self.logs_dir = os.path.join(self.expdir, "logs")
             os.makedirs(self.logs_dir, exist_ok=True)
+            print("setting torch.float32_matmul_precision to : high")
             print("using Flash sdpa : ", cuda.flash_sdp_enabled())
             print("autocast dtype set to :", self.autocast_dtype)
 
@@ -323,6 +325,7 @@ class Trainer:
         if self.master_process:
             print(f"Training started | epochs: {self.max_epoch} | batches per epoch: {len(self.train_loader)} | accum_grad: {self.accum_grad} | total updates: {self.total_steps}")
         for epoch in range(self.last_epoch, self.max_epoch):
+            self.epoch = epoch
             if self.master_process:
                 print(f"\nstarting epoch {epoch + 1}/{self.max_epoch}")
             self.train_epoch(epoch)
@@ -356,6 +359,8 @@ class Trainer:
                     all_reduce(torch.tensor(acc_accum, device=self.device), op=dist.ReduceOp.AVG)
                 
                 grad_norm = self.compute_grad_norm()
+                self.model.log_grad_norms(self.step)
+                
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm_threshold)
 
                 lr = self.lr_scheduler.step()
@@ -364,6 +369,10 @@ class Trainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 self.step += 1
+                
+                if self.step == self.step_to_start_layer_drop:
+                    self.layer_drop = True
+                    print(f"starting stochastic layer drop")
                                 
                 if self.master_process:
                     wandb.log({
@@ -416,9 +425,9 @@ class Trainer:
 
             with open(os.path.join(self.expdir, "logs", f"{epoch+1}_samples.log"), "w") as f:
                 ids_ = batch["ids_"]
-                ref = ["".join([self.idx_to_char_map.get(idx, "<f>") for idx in sample]) for sample in batch["tokens"]]
+                ref = ["".join([self.idx_to_char_map.get(int(idx), "<f>") for idx in sample]) for sample in batch["tokens"]]
                 predicted = logits.argmax(dim=-1)
-                hyp = ["".join([self.idx_to_char_map.get(idx, "<f>") for idx in sample]) for sample in predicted]
+                hyp = ["".join([self.idx_to_char_map.get(int(idx), "<f>") for idx in sample]) for sample in predicted]
                 for id_, r, h in zip(ids_, ref, hyp):
                     f.write(f"{id_}\nREF : {r}\nHYP : {h}\n")
             print(batch["tokens"])
